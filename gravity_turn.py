@@ -243,6 +243,19 @@ def main():
         if dv < 10:
             vessel.control.throttle = clamp(dv / 10.0, 0.02, 1.0)
 
+        # Auto-staging during burn
+        if vessel.available_thrust == 0 and vessel.control.current_stage > 0:
+            vessel.control.throttle = 0.0
+            time.sleep(0.5)
+            vessel.control.activate_next_stage()
+            print("\n  ⚡ STAGE SEPARATION")
+            time.sleep(0.5)
+            if vessel.available_thrust == 0 and vessel.control.current_stage > 0:
+                vessel.control.activate_next_stage()
+                print("  ⚡ ENGINE IGNITION")
+                time.sleep(0.3)
+            vessel.control.throttle = 1.0
+
         # If Δv starts increasing, we've overshot — stop immediately
         if dv > prev_remaining + 0.1 and dv < 5:
             break
