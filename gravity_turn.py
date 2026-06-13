@@ -217,11 +217,6 @@ def main():
     # ── Wait until burn start (lead by half the burn duration) ──────────
     print("\n── Phase 3: Coasting to Burn Start ──")
     burn_ut = ut() + vessel.orbit.time_to_apoapsis - (burn_dur / 2.0)
-    lead_time = 10  # warp to 10 s before burn
-
-    if burn_ut - ut() > lead_time + 5:
-        print(f"  Warping to T-{lead_time}s before burn…")
-        conn.space_center.warp_to(burn_ut - lead_time)
 
     # Fine wait
     while ut() < burn_ut:
