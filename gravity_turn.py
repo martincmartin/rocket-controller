@@ -24,8 +24,8 @@ import math
 import time
 import krpc
 
-
 # ─── Helpers ────────────────────────────────────────────────────────────────────
+
 
 def clamp(value: float, lo: float, hi: float) -> float:
     """Clamp *value* between *lo* and *hi*."""
@@ -38,20 +38,21 @@ def burn_time(vessel, delta_v: float) -> float:
     Uses the *current* stage's thrust and specific impulse.  Returns the time
     in seconds required to deliver *delta_v* m/s.
     """
-    F = vessel.available_thrust                     # N
-    Isp = vessel.specific_impulse * 9.82            # effective exhaust velocity (m/s)
-    m0 = vessel.mass                                # wet mass (kg)
+    F = vessel.available_thrust  # N
+    Isp = vessel.vacuum_specific_impulse * 9.82  # effective exhaust velocity (m/s)
+    m0 = vessel.mass  # wet mass (kg)
 
     if F == 0 or Isp == 0:
         return 0.0
 
-    m1 = m0 / math.exp(delta_v / Isp)              # dry mass after burn
-    flow_rate = F / Isp                             # kg/s
+    m1 = m0 / math.exp(delta_v / Isp)  # dry mass after burn
+    flow_rate = F / Isp  # kg/s
     return (m0 - m1) / flow_rate
 
 
-def print_telemetry(altitude, apoapsis, periapsis, pitch, throttle, speed,
-                    phase: str = ""):
+def print_telemetry(
+    altitude, apoapsis, periapsis, pitch, throttle, speed, phase: str = ""
+):
     """Print a single-line telemetry readout to the console."""
     print(
         f"\r  {phase:<20s}  "
@@ -61,23 +62,24 @@ def print_telemetry(altitude, apoapsis, periapsis, pitch, throttle, speed,
         f"Pitch {pitch:>5.1f}°  "
         f"Thr {throttle:>3.0%}  "
         f"Spd {speed:>7.1f} m/s",
-        end="", flush=True,
+        end="",
+        flush=True,
     )
 
 
 # ─── Main ───────────────────────────────────────────────────────────────────────
 
+
 def main():
     # ── Tunable Parameters ──────────────────────────────────────────────────
-    TARGET_ALTITUDE    = 80_000     # Desired circular orbit altitude (m)
-    TURN_START_ALT     = 250        # Altitude to begin pitching over (m)
-    TURN_END_ALT       = 55_000     # Altitude at which pitch reaches 0° (horizontal)
-    HEADING            = 90         # Launch azimuth (90 = due east for equatorial orbit)
-    MAX_Q_THROTTLE     = 0.75       # Throttle limit during max-Q region
-    MAX_Q_LOW          = 10_000     # Start of max-Q throttle-down band (m)
-    MAX_Q_HIGH         = 30_000     # End of max-Q throttle-down band (m)
-    AP_THROTTLE_MARGIN = 0.95       # Start tapering throttle when Ap > this × target
-
+    TARGET_ALTITUDE = 80_000  # Desired circular orbit altitude (m)
+    TURN_START_ALT = 250  # Altitude to begin pitching over (m)
+    TURN_END_ALT = 55_000  # Altitude at which pitch reaches 0° (horizontal)
+    HEADING = 90  # Launch azimuth (90 = due east for equatorial orbit)
+    MAX_Q_THROTTLE = 0.75  # Throttle limit during max-Q region
+    MAX_Q_LOW = 10_000  # Start of max-Q throttle-down band (m)
+    MAX_Q_HIGH = 30_000  # End of max-Q throttle-down band (m)
+    AP_THROTTLE_MARGIN = 0.95  # Start tapering throttle when Ap > this × target
 
     # ── Connect ─────────────────────────────────────────────────────────────
     print("Connecting to kRPC server…")
@@ -93,19 +95,19 @@ def main():
 
     # ── Telemetry Streams ───────────────────────────────────────────────────
     # Streams are much faster than polling properties repeatedly.
-    ut          = conn.add_stream(getattr, conn.space_center, "ut")
-    altitude    = conn.add_stream(getattr, vessel.flight(), "mean_altitude")
-    apoapsis    = conn.add_stream(getattr, vessel.orbit, "apoapsis_altitude")
-    periapsis   = conn.add_stream(getattr, vessel.orbit, "periapsis_altitude")
-    speed       = conn.add_stream(getattr, vessel.flight(vessel.orbit.body.reference_frame), "speed")
-    stage_fuel  = None  # set up after first staging event
+    ut = conn.add_stream(getattr, conn.space_center, "ut")
+    altitude = conn.add_stream(getattr, vessel.flight(), "mean_altitude")
+    apoapsis = conn.add_stream(getattr, vessel.orbit, "apoapsis_altitude")
+    periapsis = conn.add_stream(getattr, vessel.orbit, "periapsis_altitude")
+    speed = conn.add_stream(
+        getattr, vessel.flight(vessel.orbit.body.reference_frame), "speed"
+    )
+    stage_fuel = None  # set up after first staging event
 
     # ── Pre-Launch Setup ────────────────────────────────────────────────────
     vessel.control.sas = False
     vessel.control.rcs = False
     vessel.control.throttle = 1.0
-
-
 
     # ── Ignition ────────────────────────────────────────────────────────────
     vessel.control.activate_next_stage()
@@ -122,7 +124,7 @@ def main():
 
     while True:
         alt = altitude()
-        ap  = apoapsis()
+        ap = apoapsis()
 
         # ── Gravity turn pitch profile ──────────────────────────────────
         if alt < TURN_START_ALT:
@@ -149,7 +151,9 @@ def main():
             throttle = MAX_Q_THROTTLE
         elif ap > TARGET_ALTITUDE * AP_THROTTLE_MARGIN:
             # Taper throttle as apoapsis approaches the target
-            remaining_frac = (TARGET_ALTITUDE - ap) / (TARGET_ALTITUDE * (1 - AP_THROTTLE_MARGIN))
+            remaining_frac = (TARGET_ALTITUDE - ap) / (
+                TARGET_ALTITUDE * (1 - AP_THROTTLE_MARGIN)
+            )
             throttle = clamp(remaining_frac, 0.05, 1.0)
         else:
             throttle = 1.0
