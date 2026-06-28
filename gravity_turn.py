@@ -440,24 +440,19 @@ def main():
     )
     print(f"  Maneuver node placed at T+{vessel.orbit.time_to_apoapsis:.0f} s")
 
-    # Point at the maneuver node burn vector
-    vessel.auto_pilot.reference_frame = node.reference_frame
-    vessel.auto_pilot.target_direction = (0, 1, 0)  # node's burn vector
-    vessel.auto_pilot.stopping_time = (
-        2,
-        2,
-        2,
-    )  # gentler corrections to avoid oscillation
+    # Point prograde for coast and circularization burn
+    vessel.auto_pilot.reference_frame = vessel.orbital_reference_frame
+    vessel.auto_pilot.target_direction = (0, 1, 0)  # prograde in orbital frame
+    vessel.auto_pilot.stopping_time = (2, 2, 2)     # gentler corrections to avoid oscillation
 
     # Wait until pointing within 5° (auto_pilot.wait() demands too-tight tolerance)
     alignment_timeout = 60  # seconds
     t0 = time.time()
     while time.time() - t0 < alignment_timeout:
-        print(f"{vessel.auto_pilot.error=}")
         if vessel.auto_pilot.error < 5.0:
             break
         time.sleep(0.25)
-    print(f"  Autopilot aligned (error: {vessel.auto_pilot.error:.1f}°)")
+    print(f"  Autopilot aligned to prograde (error: {vessel.auto_pilot.error:.1f}°)")
 
     # ── Wait until burn start (lead by half the burn duration) ──────────
     print("\n── Phase 3: Coasting to Burn Start ──")
@@ -477,16 +472,16 @@ def main():
     print("\n── Phase 4: Circularization Burn ──")
     vessel.control.throttle = 1.0
 
-    # Burn until the remaining Δv in the node is very small
-    remaining_dv = conn.add_stream(getattr, node, "remaining_delta_v")
-    prev_remaining = remaining_dv()
+    # Burn until periapsis reaches the target altitude
+    prev_pe = periapsis()
 
     while True:
-        dv = remaining_dv()
+        pe = periapsis()
 
-        # Throttle down as we approach the target to avoid overshooting
-        if dv < 10:
-            vessel.control.throttle = clamp(dv / 10.0, 0.02, 1.0)
+        # Throttle down as periapsis approaches the target for precision
+        pe_remaining = TARGET_ALTITUDE - pe
+        if pe_remaining < 2000:
+            vessel.control.throttle = clamp(pe_remaining / 2000.0, 0.02, 1.0)
 
         # Auto-staging during burn
         if vessel.available_thrust == 0 and vessel.control.current_stage > 0:
@@ -501,15 +496,15 @@ def main():
                 time.sleep(0.3)
             vessel.control.throttle = 1.0
 
-        # If Δv starts increasing, we've overshot — stop immediately
-        if dv > prev_remaining + 0.1 and dv < 5:
+        # Stop when periapsis reaches (or overshoots) the target
+        if pe >= TARGET_ALTITUDE * 0.99:
             break
-        # If close enough, stop
-        if dv < 0.2:
+        # Stop if periapsis starts dropping (we've passed apoapsis)
+        if pe < prev_pe - 100 and pe > TARGET_ALTITUDE * 0.5:
             break
 
-        prev_remaining = dv
-        print(f"\r  Remaining Δv: {dv:>7.2f} m/s   ", end="", flush=True)
+        prev_pe = pe
+        print(f"\r  Periapsis: {pe:>10,.0f} m  (target: {TARGET_ALTITUDE:,} m)   ", end="", flush=True)
         time.sleep(0.05)
 
     vessel.control.throttle = 0.0
