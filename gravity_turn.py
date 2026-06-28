@@ -443,8 +443,21 @@ def main():
     # Point at the maneuver node burn vector
     vessel.auto_pilot.reference_frame = node.reference_frame
     vessel.auto_pilot.target_direction = (0, 1, 0)  # node's burn vector
-    vessel.auto_pilot.wait()
-    print("  Autopilot locked to maneuver node")
+    vessel.auto_pilot.stopping_time = (
+        2,
+        2,
+        2,
+    )  # gentler corrections to avoid oscillation
+
+    # Wait until pointing within 5° (auto_pilot.wait() demands too-tight tolerance)
+    alignment_timeout = 60  # seconds
+    t0 = time.time()
+    while time.time() - t0 < alignment_timeout:
+        print(f"{vessel.auto_pilot.error=}")
+        if vessel.auto_pilot.error < 5.0:
+            break
+        time.sleep(0.25)
+    print(f"  Autopilot aligned (error: {vessel.auto_pilot.error:.1f}°)")
 
     # ── Wait until burn start (lead by half the burn duration) ──────────
     print("\n── Phase 3: Coasting to Burn Start ──")
