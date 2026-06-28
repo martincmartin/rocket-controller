@@ -23,11 +23,7 @@ Tunable parameters are grouped at the top of main() for easy adjustment.
 import math
 import time
 import krpc
-
 from collections import namedtuple
-
-PropellantStats = namedtuple("PropellantStats", "met name current total ratio")
-
 
 # Standard gravitational acceleration (m/s²), used for Isp ↔ exhaust velocity.
 G0 = 9.80665
@@ -51,48 +47,6 @@ def engine_repr(engine):
 
 # setattr(krpc.services.spacecenter.Engine, "__format__", engine_formatter)
 krpc.services.spacecenter.Engine.__repr__ = engine_repr
-
-
-def get_propellants(met, rep):
-    return {
-        p.name: PropellantStats(
-            met, p.name, p.current_amount, p.total_resource_available, p.ratio
-        )
-        for p in rep.propellants
-    }
-
-
-def computed_flow(engine, pressure):
-    # kg / sec
-    print(
-        f"{engine.max_thrust=}, {engine.max_thrust_at(pressure)=}, {engine.max_vacuum_thrust=}"
-    )
-    print(
-        f"{engine.specific_impulse=}, {engine.specific_impulse_at(pressure)=}, {engine.vacuum_specific_impulse=}"
-    )
-    return engine.max_thrust_at(pressure) / (engine.specific_impulse * G0)
-
-
-def actual_flow(first, second):
-    for name in first:
-        s = second[name]
-        f = first[name]
-        print(
-            f"{name}, current * 50 (units/sec): {f.current*50}, {s.current*50}; computed: {(f.total - s.total) / (s.met - f.met)} units/sec"
-        )
-
-
-def compute_shit(vessel):
-    time.sleep(2.5)
-    rep = [e for e in vessel.parts.engines if e.active][0]
-    print(f"Engine: {rep.part.title}")
-    first = get_propellants(vessel.met, rep)
-    time.sleep(0.5)
-    rep = [e for e in vessel.parts.engines if e.active][0]
-    second = get_propellants(vessel.met, rep)
-    actual_flow(first, second)
-    flow = computed_flow(rep, vessel.flight().static_pressure / 101325.0)
-    print(f"  from engine: {flow / 5 * 9.0/20}, {flow / 5 * 11.0/20}")
 
 
 # ─── Helpers ────────────────────────────────────────────────────────────────────
@@ -129,9 +83,10 @@ def _engine_group_stats(engines):
     # Fuel duration: find limiting propellant.
     # Use the first engine as representative — the heuristic assumes
     # engines in the same group share the same fuel tanks.
+    PropSnap = namedtuple("PropSnap", ["name", "ratio", "available"])
     rep = engines[0]
     propellants = [
-        (p.name, p.ratio, p.total_resource_available)
+        PropSnap(p.name, p.ratio, p.total_resource_available)
         for p in rep.propellants
         if p.ratio > 0
     ]
@@ -140,9 +95,7 @@ def _engine_group_stats(engines):
 
     # sum(ratio_i * density_i) for normalising unit‐consumption rates.
     # kg/unit
-    sum_rd = sum(
-        ratio * RESOURCE_DENSITY.get(name, 5.0) for name, ratio, _ in propellants
-    )
+    sum_rd = sum(p.ratio * RESOURCE_DENSITY.get(p.name, 5.0) for p in propellants)
     if sum_rd <= 0:
         return None
 
@@ -150,14 +103,14 @@ def _engine_group_stats(engines):
     volume_rate = flow_rate / sum_rd
 
     fuel_dur = float("inf")
-    for name, ratio, amount in propellants:
-        density = RESOURCE_DENSITY.get(name, 5.0)
-        if density <= 0 or ratio <= 0:
-            print(f"!!!!! {density=}, {ratio=}")
+    for p in propellants:
+        density = RESOURCE_DENSITY.get(p.name, 5.0)
+        if density <= 0 or p.ratio <= 0:
+            print(f"!!!!! {density=}, {p.ratio=}")
             continue  # massless resources don't limit burn
-        unit_rate = volume_rate * ratio  # units/s consumed
+        unit_rate = volume_rate * p.ratio  # units/s consumed
         if unit_rate > 0:
-            fuel_dur = min(fuel_dur, amount / unit_rate)
+            fuel_dur = min(fuel_dur, p.available / unit_rate)
 
     if fuel_dur in (float("inf"), 0):
         return None
