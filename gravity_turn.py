@@ -59,11 +59,12 @@ def clamp(value: float, lo: float, hi: float) -> float:
 
 class EngineGroup:
     """Snapshot of an engine group's performance and remaining fuel."""
-    __slots__ = ('thrust', 'flow_rate', 'fuel_duration')
+
+    __slots__ = ("thrust", "flow_rate", "fuel_duration")
 
     def __init__(self, thrust, flow_rate, fuel_duration):
-        self.thrust = thrust              # N
-        self.flow_rate = flow_rate          # kg/s
+        self.thrust = thrust  # N
+        self.flow_rate = flow_rate  # kg/s
         self.fuel_duration = fuel_duration  # seconds until limiting propellant depletes
 
 
@@ -182,7 +183,6 @@ def burn_time(vessel, delta_v: float) -> float:
     remaining_dv = delta_v
     total_time = 0.0
     m = vessel.mass  # kg
-    print(f"{vessel.mass=}")
     current_stage = vessel.control.current_stage
 
     # Start with the currently active engine groups.
@@ -193,24 +193,17 @@ def burn_time(vessel, delta_v: float) -> float:
         if remaining_dv <= 0:
             break
 
-        print(f"{remaining_dv=}, {groups=}")
-
         # ── If no groups, try to simulate the next staging event ─────
         if not groups:
             found = False
             while current_stage > 0:
-                print(f"Simulating staging of stage {current_stage}.")
-                for p in vessel.parts.all:
-                    if p.decouple_stage == current_stage:
-                        print(f"decoupling {p.title}, mass {p.mass}")
-
-                # Mass of parts that separate at this stage.
+                # Dry mass of parts that separate at this stage.
+                # Fuel mass was already subtracted from m during segment simulation.
                 drop = sum(
-                    p.mass
+                    p.dry_mass
                     for p in vessel.parts.all
                     if p.decouple_stage == current_stage
                 )
-                print("Total mass dropping in this decoupling: {drop}")
                 m -= drop
                 current_stage -= 1
                 groups = _discover_engine_groups(
@@ -227,9 +220,6 @@ def burn_time(vessel, delta_v: float) -> float:
         if not groups:
             continue
 
-        for g in groups:
-            print(g)
-
         # ── Segment simulation ───────────────────────────────────────
         # Find the group that depletes first.
         min_dur = min(g.fuel_duration for g in groups)
@@ -240,16 +230,13 @@ def burn_time(vessel, delta_v: float) -> float:
         if total_flow <= 0 or F_total <= 0:
             break
         ve = F_total / total_flow
-        print(f"{ve=}")
 
         # Δv available in this segment (Tsiolkovsky).
         mass_consumed = total_flow * min_dur
-        print(f"{mass_consumed=}, {m=}")
         if mass_consumed >= m:
             print(f"!!! WTF????")
             break
         dv_segment = ve * math.log(m / (m - mass_consumed))
-        print(f"{dv_segment=}")
 
         if dv_segment >= remaining_dv:
             # We finish the burn inside this segment.
@@ -262,7 +249,6 @@ def burn_time(vessel, delta_v: float) -> float:
             total_time += min_dur
             remaining_dv -= dv_segment
             m -= mass_consumed
-            print(f"mass of entire vessel after burn but before staging: {m} kg")
             groups = [g for g in groups if g.fuel_duration > min_dur + 0.001]
             for g in groups:
                 g.fuel_duration -= min_dur
