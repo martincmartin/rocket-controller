@@ -392,22 +392,6 @@ def main():
 
         time.sleep(0.05)
 
-    # conn.space_center.physics_warp_factor = 0
-
-    # print("\n***** While thrusting")
-    # compute_shit(vessel)
-
-    # vessel.control.throttle = 0.0
-    # print("***** No thrust")
-    # compute_shit(vessel)
-
-    # while altitude() <= 70_000:
-    #     time.sleep(1)
-
-    # vessel.control.throttle = 1.0
-    # print("\n***** While thrusting in vacuum")
-    # compute_shit(vessel)
-
     # Cut throttle once target apoapsis is reached
     vessel.control.throttle = 0.0
     conn.space_center.physics_warp_factor = 3  # 4× physics warp during coast
@@ -443,7 +427,11 @@ def main():
     # Point prograde for coast and circularization burn
     vessel.auto_pilot.reference_frame = vessel.orbital_reference_frame
     vessel.auto_pilot.target_direction = (0, 1, 0)  # prograde in orbital frame
-    vessel.auto_pilot.stopping_time = (2, 2, 2)     # gentler corrections to avoid oscillation
+    vessel.auto_pilot.stopping_time = (
+        2,
+        2,
+        2,
+    )  # gentler corrections to avoid oscillation
 
     # Wait until pointing within 5° (auto_pilot.wait() demands too-tight tolerance)
     alignment_timeout = 60  # seconds
@@ -504,7 +492,11 @@ def main():
             break
 
         prev_pe = pe
-        print(f"\r  Periapsis: {pe:>10,.0f} m  (target: {TARGET_ALTITUDE:,} m)   ", end="", flush=True)
+        print(
+            f"\r  Periapsis: {pe:>10,.0f} m  (target: {TARGET_ALTITUDE:,} m)   ",
+            end="",
+            flush=True,
+        )
         time.sleep(0.05)
 
     vessel.control.throttle = 0.0
