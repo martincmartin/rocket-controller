@@ -24,6 +24,77 @@ import math
 import time
 import krpc
 
+from collections import namedtuple
+
+PropellantStats = namedtuple("PropellantStats", "met name current total ratio")
+
+
+# Standard gravitational acceleration (m/s²), used for Isp ↔ exhaust velocity.
+G0 = 9.80665
+
+# KSP stock resource densities (kg per unit).
+# Used to convert propellant amounts → mass for fuel‐duration estimates.
+RESOURCE_DENSITY = {
+    "LiquidFuel": 5.0,
+    "Oxidizer": 5.0,
+    "SolidFuel": 7.5,
+    "MonoPropellant": 4.0,
+    "XenonGas": 0.1,
+    "ElectricCharge": 0.0,  # massless — ignored in flow calculations
+    "IntakeAir": 0.0,
+}
+
+
+def engine_repr(engine):
+    return engine.part.title
+
+
+# setattr(krpc.services.spacecenter.Engine, "__format__", engine_formatter)
+krpc.services.spacecenter.Engine.__repr__ = engine_repr
+
+
+def get_propellants(met, rep):
+    return {
+        p.name: PropellantStats(
+            met, p.name, p.current_amount, p.total_resource_available, p.ratio
+        )
+        for p in rep.propellants
+    }
+
+
+def computed_flow(engine, pressure):
+    # kg / sec
+    print(
+        f"{engine.max_thrust=}, {engine.max_thrust_at(pressure)=}, {engine.max_vacuum_thrust=}"
+    )
+    print(
+        f"{engine.specific_impulse=}, {engine.specific_impulse_at(pressure)=}, {engine.vacuum_specific_impulse=}"
+    )
+    return engine.max_thrust_at(pressure) / (engine.specific_impulse * G0)
+
+
+def actual_flow(first, second):
+    for name in first:
+        s = second[name]
+        f = first[name]
+        print(
+            f"{name}, current * 50 (units/sec): {f.current*50}, {s.current*50}; computed: {(f.total - s.total) / (s.met - f.met)} units/sec"
+        )
+
+
+def compute_shit(vessel):
+    time.sleep(2.5)
+    rep = [e for e in vessel.parts.engines if e.active][0]
+    print(f"Engine: {rep.part.title}")
+    first = get_propellants(vessel.met, rep)
+    time.sleep(0.5)
+    rep = [e for e in vessel.parts.engines if e.active][0]
+    second = get_propellants(vessel.met, rep)
+    actual_flow(first, second)
+    flow = computed_flow(rep, vessel.flight().static_pressure / 101325.0)
+    print(f"  from engine: {flow / 5 * 9.0/20}, {flow / 5 * 11.0/20}")
+
+
 # ─── Helpers ────────────────────────────────────────────────────────────────────
 
 
@@ -32,22 +103,212 @@ def clamp(value: float, lo: float, hi: float) -> float:
     return max(lo, min(hi, value))
 
 
-def burn_time(vessel, delta_v: float) -> float:
-    """Estimate the burn duration for a given Δv using the Tsiolkovsky equation.
+def _engine_group_stats(engines):
+    """Compute performance stats for a group of engines sharing fuel.
 
-    Uses the *current* stage's thrust and specific impulse.  Returns the time
-    in seconds required to deliver *delta_v* m/s.
+    Returns a dict with thrust (N), isp (s), ve (m/s), flow_rate (kg/s),
+    and fuel_duration (s), or *None* if the group cannot produce thrust.
     """
-    F = vessel.available_thrust  # N
-    Isp = vessel.vacuum_specific_impulse * 9.82  # effective exhaust velocity (m/s)
-    m0 = vessel.mass  # wet mass (kg)
+    # Engine.max_vacuum_thrust: Newtons = kg m/s^2
+    thrust = sum(e.max_vacuum_thrust for e in engines)
+    if thrust <= 0:
+        return None
 
-    if F == 0 or Isp == 0:
-        return 0.0
+    # total mass flow for this group (kg/s)
+    flow_rate = 0.0
+    for e in engines:
+        # Engine.vacuum_specific_impulse: seconds
+        # Ve: m / sec
+        ve = e.vacuum_specific_impulse * G0
+        if ve > 0:
+            # Engine.max_vacuum_thrust: Newtons = kg m/s^2
+            flow_rate += e.max_vacuum_thrust / ve
+    if flow_rate <= 0:
+        return None
 
-    m1 = m0 / math.exp(delta_v / Isp)  # dry mass after burn
-    flow_rate = F / Isp  # kg/s
-    return (m0 - m1) / flow_rate
+    # Fuel duration: find limiting propellant.
+    # Use the first engine as representative — the heuristic assumes
+    # engines in the same group share the same fuel tanks.
+    rep = engines[0]
+    propellants = [
+        (p.name, p.ratio, p.total_resource_available)
+        for p in rep.propellants
+        if p.ratio > 0
+    ]
+    if not propellants:
+        return None
+
+    # sum(ratio_i * density_i) for normalising unit‐consumption rates.
+    # kg/unit
+    sum_rd = sum(
+        ratio * RESOURCE_DENSITY.get(name, 5.0) for name, ratio, _ in propellants
+    )
+    if sum_rd <= 0:
+        return None
+
+    # Total "volume" of propellant consumed, in "resource units" per second.
+    volume_rate = flow_rate / sum_rd
+
+    fuel_dur = float("inf")
+    for name, ratio, amount in propellants:
+        density = RESOURCE_DENSITY.get(name, 5.0)
+        if density <= 0 or ratio <= 0:
+            print(f"!!!!! {density=}, {ratio=}")
+            continue  # massless resources don't limit burn
+        unit_rate = volume_rate * ratio  # units/s consumed
+        if unit_rate > 0:
+            fuel_dur = min(fuel_dur, amount / unit_rate)
+
+    if fuel_dur in (float("inf"), 0):
+        return None
+
+    return {
+        "thrust": thrust,
+        "flow_rate": flow_rate,
+        "fuel_duration": fuel_dur,
+    }
+
+
+def _discover_engine_groups(vessel, active_only=True, stage_filter=None):
+    """Group engines by (decouple_stage, propellant types).
+
+    Args:
+        vessel:       kRPC vessel object.
+        active_only:  If True only include engines that are active with fuel.
+        stage_filter: If set only include engines whose *part.stage* matches.
+
+    Returns a list of engine-group dicts (see ``_engine_group_stats``).
+    """
+    by_key = {}
+    for engine in vessel.parts.engines:
+        if active_only and (not engine.active or not engine.has_fuel):
+            continue
+        if stage_filter is not None and engine.part.stage != stage_filter:
+            continue
+        if engine.max_thrust <= 0:
+            continue
+
+        prop_names = frozenset(p.name for p in engine.propellants if p.ratio > 0)
+        if not prop_names:
+            continue
+        key = (engine.part.decouple_stage, prop_names)
+        by_key.setdefault(key, []).append(engine)
+
+    groups = []
+    for _key, eng_list in by_key.items():
+        stats = _engine_group_stats(eng_list)
+        if stats is not None:
+            groups.append(stats)
+    return groups
+
+
+def burn_time(vessel, delta_v: float) -> float:
+    """Estimate burn duration for *delta_v* m/s.
+
+    Accounts for:
+    * **Multiple engine groups** — engines with separate fuel supplies that
+      deplete at different times within the same stage.
+    * **Staging** — when all groups in the current stage are exhausted,
+      decoupled mass is subtracted and engines in the next stage are used.
+
+    Engine groups are identified by the heuristic key
+    ``(decouple_stage, frozenset(propellant_names))``.
+
+    The burn is simulated as a sequence of *segments*.  Each segment has a
+    constant set of active engine groups (and therefore constant total
+    thrust and combined Isp).  A segment ends when the first group runs
+    out of fuel, at which point that group is removed and a new segment
+    begins with the remaining groups.
+    """
+    remaining_dv = delta_v
+    total_time = 0.0
+    m = vessel.mass  # kg
+    print(f"{vessel.mass=}")
+    current_stage = vessel.control.current_stage
+
+    # Start with the currently active engine groups.
+    groups = _discover_engine_groups(vessel, active_only=True)
+
+    max_iterations = 50  # safety limit
+    for _ in range(max_iterations):
+        if remaining_dv <= 0:
+            break
+
+        print(f"{remaining_dv=}, {groups=}")
+
+        # ── If no groups, try to simulate the next staging event ─────
+        if not groups:
+            found = False
+            while current_stage > 0:
+                print(f"Simulating staging of stage {current_stage}.")
+                for p in vessel.parts.all:
+                    if p.decouple_stage == current_stage:
+                        print(f"decoupling {p.title}, mass {p.mass}")
+
+                # Mass of parts that separate at this stage.
+                drop = sum(
+                    p.mass
+                    for p in vessel.parts.all
+                    if p.decouple_stage == current_stage
+                )
+                print("Total mass dropping in this decoupling: {drop}")
+                m -= drop
+                current_stage -= 1
+                groups = _discover_engine_groups(
+                    vessel, active_only=False, stage_filter=current_stage
+                )
+                if groups:
+                    found = True
+                    break
+            if not found:
+                break
+
+        # Remove groups that are already empty.
+        groups = [g for g in groups if g["fuel_duration"] > 0]
+        if not groups:
+            continue
+
+        for g in groups:
+            print(g)
+
+        # ── Segment simulation ───────────────────────────────────────
+        # Find the group that depletes first.
+        min_dur = min(g["fuel_duration"] for g in groups)
+
+        # Aggregate performance across all active groups.
+        F_total = sum(g["thrust"] for g in groups)
+        total_flow = sum(g["flow_rate"] for g in groups)
+        if total_flow <= 0 or F_total <= 0:
+            break
+        ve = F_total / total_flow
+        print(f"{ve=}")
+
+        # Δv available in this segment (Tsiolkovsky).
+        mass_consumed = total_flow * min_dur
+        print(f"{mass_consumed=}, {m=}")
+        if mass_consumed >= m:
+            print(f"!!! WTF????")
+            break
+        dv_segment = ve * math.log(m / (m - mass_consumed))
+        print(f"{dv_segment=}")
+
+        if dv_segment >= remaining_dv:
+            # We finish the burn inside this segment.
+            m_after = m * math.exp(-remaining_dv / ve)
+            t = (m - m_after) / total_flow
+            total_time += t
+            remaining_dv = 0
+        else:
+            # Entire segment is consumed — remove the depleted group.
+            total_time += min_dur
+            remaining_dv -= dv_segment
+            m -= mass_consumed
+            print(f"mass of entire vessel after burn but before staging: {m} kg")
+            groups = [g for g in groups if g["fuel_duration"] > min_dur + 0.001]
+            for g in groups:
+                g["fuel_duration"] -= min_dur
+
+    return total_time
 
 
 def print_telemetry(
@@ -73,10 +334,11 @@ def print_telemetry(
 def main():
     # ── Tunable Parameters ──────────────────────────────────────────────────
     TARGET_ALTITUDE = 80_000  # Desired circular orbit altitude (m)
-    TURN_START_ALT = 250  # Altitude to begin pitching over (m)
-    TURN_END_ALT = 55_000  # Altitude at which pitch reaches 0° (horizontal)
+    TURN_START_ALT = 100  # Altitude to begin pitching over (m)
+    TURN_END_ALT = 35_000  # Altitude at which pitch reaches 0° (horizontal)
     HEADING = 90  # Launch azimuth (90 = due east for equatorial orbit)
-    MAX_Q_THROTTLE = 0.75  # Throttle limit during max-Q region
+    # MAX_Q_THROTTLE = 0.75  # Throttle limit during max-Q region
+    MAX_Q_THROTTLE = 1.0  # Throttle limit during max-Q region
     MAX_Q_LOW = 10_000  # Start of max-Q throttle-down band (m)
     MAX_Q_HIGH = 30_000  # End of max-Q throttle-down band (m)
     AP_THROTTLE_MARGIN = 0.95  # Start tapering throttle when Ap > this × target
@@ -115,12 +377,17 @@ def main():
     vessel.auto_pilot.target_pitch_and_heading(90, HEADING)
     vessel.auto_pilot.target_roll = 90
 
+    # print("***** At launch")
+    # compute_shit(vessel)
+
     # ═══════════════════════════════════════════════════════════════════════
     #  PHASE 1 — Ascent & Gravity Turn
     # ═══════════════════════════════════════════════════════════════════════
     print("\n── Phase 1: Ascent & Gravity Turn ──")
     conn.space_center.physics_warp_factor = 1  # 2× physics warp during ascent
     turn_angle = 0.0
+
+    _discover_engine_groups(vessel)
 
     while True:
         alt = altitude()
@@ -179,6 +446,22 @@ def main():
             break
 
         time.sleep(0.05)
+
+    # conn.space_center.physics_warp_factor = 0
+
+    # print("\n***** While thrusting")
+    # compute_shit(vessel)
+
+    # vessel.control.throttle = 0.0
+    # print("***** No thrust")
+    # compute_shit(vessel)
+
+    # while altitude() <= 70_000:
+    #     time.sleep(1)
+
+    # vessel.control.throttle = 1.0
+    # print("\n***** While thrusting in vacuum")
+    # compute_shit(vessel)
 
     # Cut throttle once target apoapsis is reached
     vessel.control.throttle = 0.0
