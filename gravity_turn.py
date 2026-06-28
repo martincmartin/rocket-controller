@@ -57,6 +57,16 @@ def clamp(value: float, lo: float, hi: float) -> float:
     return max(lo, min(hi, value))
 
 
+class EngineGroup:
+    """Snapshot of an engine group's performance and remaining fuel."""
+    __slots__ = ('thrust', 'flow_rate', 'fuel_duration')
+
+    def __init__(self, thrust, flow_rate, fuel_duration):
+        self.thrust = thrust              # N
+        self.flow_rate = flow_rate          # kg/s
+        self.fuel_duration = fuel_duration  # seconds until limiting propellant depletes
+
+
 def _engine_group_stats(engines):
     """Compute performance stats for a group of engines sharing fuel.
 
@@ -115,11 +125,7 @@ def _engine_group_stats(engines):
     if fuel_dur in (float("inf"), 0):
         return None
 
-    return {
-        "thrust": thrust,
-        "flow_rate": flow_rate,
-        "fuel_duration": fuel_dur,
-    }
+    return EngineGroup(thrust, flow_rate, fuel_dur)
 
 
 def _discover_engine_groups(vessel, active_only=True, stage_filter=None):
@@ -217,7 +223,7 @@ def burn_time(vessel, delta_v: float) -> float:
                 break
 
         # Remove groups that are already empty.
-        groups = [g for g in groups if g["fuel_duration"] > 0]
+        groups = [g for g in groups if g.fuel_duration > 0]
         if not groups:
             continue
 
@@ -226,11 +232,11 @@ def burn_time(vessel, delta_v: float) -> float:
 
         # ── Segment simulation ───────────────────────────────────────
         # Find the group that depletes first.
-        min_dur = min(g["fuel_duration"] for g in groups)
+        min_dur = min(g.fuel_duration for g in groups)
 
         # Aggregate performance across all active groups.
-        F_total = sum(g["thrust"] for g in groups)
-        total_flow = sum(g["flow_rate"] for g in groups)
+        F_total = sum(g.thrust for g in groups)
+        total_flow = sum(g.flow_rate for g in groups)
         if total_flow <= 0 or F_total <= 0:
             break
         ve = F_total / total_flow
@@ -257,9 +263,9 @@ def burn_time(vessel, delta_v: float) -> float:
             remaining_dv -= dv_segment
             m -= mass_consumed
             print(f"mass of entire vessel after burn but before staging: {m} kg")
-            groups = [g for g in groups if g["fuel_duration"] > min_dur + 0.001]
+            groups = [g for g in groups if g.fuel_duration > min_dur + 0.001]
             for g in groups:
-                g["fuel_duration"] -= min_dur
+                g.fuel_duration -= min_dur
 
     return total_time
 
