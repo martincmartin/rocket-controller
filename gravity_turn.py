@@ -23,6 +23,7 @@ Tunable parameters are grouped at the top of main() for easy adjustment.
 import math
 import time
 import krpc
+import numpy as np
 from collections import namedtuple
 
 # Standard gravitational acceleration (m/s²), used for Isp ↔ exhaust velocity.
@@ -126,6 +127,7 @@ def _engine_group_stats(engines):
     if fuel_dur in (float("inf"), 0):
         return None
 
+    print(f"{rep.part.title}: {thrust=}, {flow_rate=}, {fuel_dur=}")
     return EngineGroup(thrust, flow_rate, fuel_dur)
 
 
@@ -273,26 +275,78 @@ def print_telemetry(
     )
 
 
-# ─── Main ───────────────────────────────────────────────────────────────────────
+def resource_mass(vessel):
+    return sum(r.amount * r.density for r in vessel.resources.all)
 
 
-def main():
+def plan_circularization(vessel):
+    body = vessel.orbit.body
+    frame = body.non_rotating_reference_frame
+
+    # Position (m)
+    r3d = np.array(vessel.position(frame))
+
+    # Velocity (m/s)
+    v3d = np.array(vessel.velocity(frame))
+
+    print(
+        f"{r3d=}, {v3d=}, {vessel.mass=}, mu = {body.gravitational_parameter}, time to apopasis={vessel.orbit.time_to_apoapsis}"
+    )
+
+    # Reduce to 2D in the orbital plane.  r_hat will be our new x axis, w_hat
+    # our new y.
+
+    # r_hat, w_hat, r, v = project(r3d, v3d)
+
+    # mu = body.gravitational_parameter
+    # m0 = vessel.mass
+
+
+"""
+To plan circularization burn, consider using solve_ivp function from the SciPy library
+with the 4 systems of equations:
+
+d^2 r_ / d t^2 =−μ/r^3 ​r_ + (m0 - T​/ve t) v_hat
+where r_ and v_ are 2D vectors, and v_ = d r_ / d t
+
+Could use scipy.optimize.minimize_scalar to then find the best time to start the burn.
+
+"For spacecraft dynamics, solve_ivp with the "DOP853" method (high accuracy,
+non-stiff) is often an excellent choice:"
+
+For when to start the burn, choose instead the universal variable, and determine
+time, x_vec and v_vec from that.  https://en.wikipedia.org/wiki/Universal_variable_formulation
+and Bate, Mueller & Whites Fundamentals of Astrodynamics section 4.3.  Or, during
+the integration, in the timestep where the thrust is turned on, just assume the thrust
+is proportional to the % time on?  In other words, if youre doing full thrust for 60%
+of the time step, assume 60% thrust for the whole time step?  Would be a lot easier
+and probably close enough...
+
+Could also consider poliastro: https://docs.poliastro.space/en/stable/
+"""
+
+
+# Main gravity turn implementation.
+# TURN_START_ALT = 100  # Altitude to begin pitching over (m)
+# TURN_END_ALT = 35_000  # Altitude at which pitch reaches 0° (horizontal)
+def gravity_turn(conn, turn_start_alt, turn_end_alt):
     # ── Tunable Parameters ──────────────────────────────────────────────────
     TARGET_ALTITUDE = 80_000  # Desired circular orbit altitude (m)
-    TURN_START_ALT = 100  # Altitude to begin pitching over (m)
-    TURN_END_ALT = 35_000  # Altitude at which pitch reaches 0° (horizontal)
+    ENGINE_CUTOFF_ALTITUDE = 60_000  # Once apopasis reaches this, cut engines.
     HEADING = 90  # Launch azimuth (90 = due east for equatorial orbit)
     # MAX_Q_THROTTLE = 0.75  # Throttle limit during max-Q region
     MAX_Q_THROTTLE = 1.0  # Throttle limit during max-Q region
     MAX_Q_LOW = 10_000  # Start of max-Q throttle-down band (m)
     MAX_Q_HIGH = 30_000  # End of max-Q throttle-down band (m)
+    AP_WARP_MARGIN = 0.90  # Turn off warp when Ap > this x target
     AP_THROTTLE_MARGIN = 0.95  # Start tapering throttle when Ap > this × target
+    ATMOSPHERE_ALTITUDE = 25_000  # Kerbin atmosphere is 0.01 atm at 25k, 0.001 at 40k.
 
-    # ── Connect ─────────────────────────────────────────────────────────────
-    print("Connecting to kRPC server…")
-    conn = krpc.connect(name="Gravity Turn")
     vessel = conn.space_center.active_vessel
     print(f"  Vessel: {vessel.name}")
+
+    mass = resource_mass(vessel)
+    print(f"Starting resource mass: {mass} kg")
 
     # Reference body parameters (Kerbin)
     body = vessel.orbit.body
@@ -322,9 +376,6 @@ def main():
     vessel.auto_pilot.target_pitch_and_heading(90, HEADING)
     vessel.auto_pilot.target_roll = 90
 
-    # print("***** At launch")
-    # compute_shit(vessel)
-
     # ═══════════════════════════════════════════════════════════════════════
     #  PHASE 1 — Ascent & Gravity Turn
     # ═══════════════════════════════════════════════════════════════════════
@@ -332,20 +383,18 @@ def main():
     conn.space_center.physics_warp_factor = 1  # 2× physics warp during ascent
     turn_angle = 0.0
 
-    _discover_engine_groups(vessel)
-
     while True:
         alt = altitude()
         ap = apoapsis()
 
         # ── Gravity turn pitch profile ──────────────────────────────────
-        if alt < TURN_START_ALT:
+        if alt < turn_start_alt:
             # Vertical ascent
             target_pitch = 90.0
             phase = "Vertical ascent"
-        elif alt < TURN_END_ALT:
+        elif alt < turn_end_alt:
             # Smooth sinusoidal pitch-over
-            frac = (alt - TURN_START_ALT) / (TURN_END_ALT - TURN_START_ALT)
+            frac = (alt - turn_start_alt) / (turn_end_alt - turn_start_alt)
             target_pitch = 90.0 - (frac * 90.0)
             phase = "Gravity turn"
         else:
@@ -358,18 +407,23 @@ def main():
             vessel.auto_pilot.target_pitch_and_heading(turn_angle, HEADING)
 
         # ── Throttle management ─────────────────────────────────────────
-        if MAX_Q_LOW < alt < MAX_Q_HIGH:
-            # Reduce throttle through max-Q to limit aerodynamic stress
-            throttle = MAX_Q_THROTTLE
-        elif ap > TARGET_ALTITUDE * AP_THROTTLE_MARGIN:
+        # if MAX_Q_LOW < alt < MAX_Q_HIGH:
+        #     # Reduce throttle through max-Q to limit aerodynamic stress
+        #     throttle = MAX_Q_THROTTLE
+        if ap > ENGINE_CUTOFF_ALTITUDE * AP_THROTTLE_MARGIN:
             # Taper throttle as apoapsis approaches the target
-            remaining_frac = (TARGET_ALTITUDE - ap) / (
-                TARGET_ALTITUDE * (1 - AP_THROTTLE_MARGIN)
+            remaining_frac = (ENGINE_CUTOFF_ALTITUDE - ap) / (
+                ENGINE_CUTOFF_ALTITUDE * (1 - AP_THROTTLE_MARGIN)
             )
+            print(f"{remaining_frac=}")
             throttle = clamp(remaining_frac, 0.05, 1.0)
         else:
             throttle = 1.0
         vessel.control.throttle = throttle
+
+        if ap > ENGINE_CUTOFF_ALTITUDE * AP_WARP_MARGIN:
+            print("Turning off warp!")
+            conn.space_center.physics_warp_factor = 0  # 1× physics warp when close.
 
         # ── Auto-staging (fuel depletion check) ─────────────────────────
         if vessel.available_thrust == 0 and vessel.control.current_stage > 0:
@@ -387,7 +441,7 @@ def main():
         print_telemetry(alt, ap, periapsis(), turn_angle, throttle, speed(), phase)
 
         # ── Exit condition: apoapsis reached ────────────────────────────
-        if ap >= TARGET_ALTITUDE * 0.99:
+        if ap >= ENGINE_CUTOFF_ALTITUDE:
             break
 
         time.sleep(0.05)
@@ -397,20 +451,25 @@ def main():
     conn.space_center.physics_warp_factor = 3  # 4× physics warp during coast
     print(f"\n  ✓ Target apoapsis reached: {apoapsis():.0f} m")
 
+    # Wait for solid boosters to burn out, and to be (mostly) out of the atmosphere
+    while vessel.thrust > 0 or altitude() < ATMOSPHERE_ALTITUDE:
+        time.sleep(0.1)
+
     # ═══════════════════════════════════════════════════════════════════════
     #  PHASE 2 — Coast to Apoapsis & Circularization Burn
     # ═══════════════════════════════════════════════════════════════════════
     print("\n── Phase 2: Planning Circularization Burn ──")
 
-    # Calculate the required Δv for a circular orbit at the target altitude
+    plan_circularization(vessel)
+
+    # This should be a helper function.
+    # Calculate the required Δv to raise periapsis to desired value.
     r_target = body_radius + TARGET_ALTITUDE
-    v_circular = math.sqrt(mu / r_target)
-    # Vis-viva: current velocity at apoapsis of the transfer orbit
-    a_transfer = (body_radius + vessel.orbit.periapsis_altitude + 2 * r_target) / 2
-    # More precisely, use the actual semi-major axis
-    a_transfer = vessel.orbit.semi_major_axis
-    v_apoapsis = math.sqrt(mu * (2.0 / r_target - 1.0 / a_transfer))
-    delta_v = v_circular - v_apoapsis
+    r_apoapsis = body_radius + apoapsis()
+    v_now = math.sqrt(mu * (2 / r_apoapsis - 1 / vessel.orbit.semi_major_axis))
+    v_goal = math.sqrt(mu * (2 / r_apoapsis - 2 / (r_target + r_apoapsis)))
+
+    delta_v = v_goal - v_now
     print(f"  Δv for circularization: {delta_v:.1f} m/s")
 
     # Compute burn time
@@ -449,7 +508,11 @@ def main():
     # Fine wait
     while ut() < burn_ut:
         time_remaining = burn_ut - ut()
-        print(f"\r  Burn in {time_remaining:>6.1f} s   ", end="", flush=True)
+        print(
+            f"\r  Burn in {time_remaining:>6.1f} s, apopasis={apoapsis()}   ",
+            end="",
+            flush=True,
+        )
         time.sleep(0.1)
     print()
 
@@ -519,6 +582,23 @@ def main():
     vessel.auto_pilot.disengage()
     vessel.control.sas = True
     print("Autopilot disengaged. SAS enabled. Have a safe flight! 🚀")
+
+    final_mass = resource_mass(vessel)
+    print(
+        f"Remaining resource mass: {final_mass} kg, used mass: {mass - final_mass} kg"
+    )
+    return final_mass
+
+
+# ─── Main ───────────────────────────────────────────────────────────────────────
+
+
+def main():
+    # ── Connect ─────────────────────────────────────────────────────────────
+    print("Connecting to kRPC server…")
+    conn = krpc.connect(name="Gravity Turn")
+
+    gravity_turn(conn, 100, 15_000)
 
     conn.close()
 
