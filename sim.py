@@ -1,3 +1,5 @@
+#!/usr/bin/env python3
+
 import math
 import numpy as np
 from scipy.integrate import solve_ivp
@@ -54,7 +56,7 @@ def project(r, v):
     return (r_hat, w_hat, r_projected, v_projected)
 
 
-def prograde_dynamics(t, state, mu, thrust, ve):
+def prograde_dynamics(t, state, mu, ve, thrust=0.0):
 
     x, y, vx, vy, m = state
 
@@ -145,6 +147,32 @@ def orbital_elements(r, v, mu):
     }
 
 
+class Simulator:
+    """Prograde-burn orbital simulation."""
+
+    ATOL_VECTOR = [
+        1.0,  # Position within 1 meter.
+        1.0,
+        0.001,  # Velocity within 0.001 meters / sec
+        0.001,
+        0.1,  # Mass within 100 grams
+    ]
+
+    def __init__(self, mu):
+        self.mu = mu
+
+    def solve(self, t_span, r, v, mass, ve, thrust):
+        return solve_ivp(
+            prograde_dynamics,
+            t_span,
+            (r[0], r[1], v[0], v[1], mass),
+            args=(self.mu, ve, thrust),
+            rtol=1e-10,
+            atol=self.ATOL_VECTOR,
+            dense_output=True,
+        )
+
+
 def error(state):
     elements = orbital_elements(
         np.array([state[0], state[1]]), np.array([state[2], state[3]]), MU
@@ -161,25 +189,11 @@ def error(state):
 def find_burn_params(time_to_apopasis, mass):
     r_hat, w_hat, r, v = project(R3D, V3D)
 
+    sim = Simulator(MU)
+
     # Simulate coasting (no thrust) up until apopasis.  We know we need to burn
     # before apoapsis, so that's a good upper bound on when to start burning.
-    atol_vector = [
-        1.0,  # Position within 1 meter.
-        1.0,
-        0.001,  # Velocity within 0.001 meters / sec
-        0.001,
-        0.1,  # Mass within 100 grams
-    ]
-
-    sol = solve_ivp(
-        prograde_dynamics,
-        (0, time_to_apopasis),
-        (r[0], r[1], v[0], v[1], mass),
-        args=(MU, 0.0, VE),
-        rtol=1e-10,
-        atol=atol_vector,
-        dense_output=True,
-    )
+    sol = sim.solve((0, time_to_apopasis), r, v, mass, VE, 0.0)
 
     # print(sol.t[-1], ": ", sol.y[:, -1])
 
@@ -193,7 +207,7 @@ def find_burn_params(time_to_apopasis, mass):
     def start_burn_at(t):
         print(f"***** Start burn at {t}")
         x, y, vx, vy, mass = sol.sol(t)
-        return burn(np.array([x, y]), np.array([vx, vy]), mass, MAX_BURN_TIME)
+        return burn(sim, np.array([x, y]), np.array([vx, vy]), mass, MAX_BURN_TIME)
 
     res = minimize_scalar(
         start_burn_at,
@@ -209,24 +223,8 @@ def find_burn_params(time_to_apopasis, mass):
     print(res)
 
 
-def burn(r, v, mass, max_burn_time):
-    atol_vector = [
-        1.0,  # Position within 1 meter.
-        1.0,
-        0.001,  # Velocity within 0.001 meters / sec
-        0.001,
-        0.1,  # Mass within 100 grams
-    ]
-
-    sol = solve_ivp(
-        prograde_dynamics,
-        (0, max_burn_time),
-        (r[0], r[1], v[0], v[1], mass),
-        args=(MU, THRUST, VE),
-        rtol=1e-10,
-        atol=atol_vector,
-        dense_output=True,
-    )
+def burn(sim, r, v, mass, max_burn_time):
+    sol = sim.solve((0, max_burn_time), r, v, mass, VE, THRUST)
 
     # for t, state in zip(sol.t, sol.y.T):
     #     x, y, vx, vy, mass = state
