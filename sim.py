@@ -13,6 +13,7 @@ VE = 320 * 9.80665  # m / sec
 THRUST = 215_000.0  # Newtons = kg m / sec^2
 MAX_BURN_TIME = 46.821997702277805
 M0 = 13047.876953125
+# 9840.0 mass after burn
 
 # Terrier
 VE2 = 345 * 9.80665  # m / sec
@@ -24,8 +25,6 @@ R3D = np.array([423509.49245169, -1031.13489835, -460228.99268734])
 V3D = np.array([1.03083505e03, -3.27490193e-01, -1.20314861e02])
 MU = 3.5316e12
 TIME_TO_APOAPSIS = 102.46951509735595
-
-# 9839.999675337182 mass after burn
 
 """
 - Verify that, after the Swivel has burned out, the mass is 9832.493492035084 .
@@ -180,6 +179,37 @@ class Simulator:
             dense_output=True,
         )
 
+    def burn(self, r, v, mass, ve, thrust, max_burn_time):
+        sol = self.solve((0, max_burn_time), r, v, mass, ve, thrust)
+
+        # for t, state in zip(sol.t, sol.y.T):
+        #     x, y, vx, vy, mass = state
+        #     elements = orbital_elements(np.array([x, y]), np.array([vx, vy]), self.mu)
+        #     print(state)
+        #     print(
+        #         f't: {t}, apoapsis = {elements["apoapsis_radius"]}, periapsis = {elements["periapsis_radius"]}, mass = {mass}'
+        #     )
+
+        # print(f"{sol.y}")
+
+        def objective(t):
+            # print(f"** Burn for {t} sec")
+            return error(sol.sol(t))
+
+        res = minimize_scalar(
+            objective,
+            bounds=(0, max_burn_time),
+            method="bounded",
+            options={"xatol": 0.01},  # Find burn time to with xatol seconds.
+        )
+        print(res)
+        if res.success:
+            print(f"Burn for {res.x} sec, RMS error: {res.fun / 1000.0} km")
+            return res.fun
+        else:
+            print("Couldn't find burn time to minimze orbital error.")
+            return np.inf
+
 
 def error(state):
     elements = orbital_elements(
@@ -215,7 +245,9 @@ def find_burn_params(time_to_apopasis, mass):
     def start_burn_at(t):
         print(f"***** Start burn at {t}")
         x, y, vx, vy, mass = sol.sol(t)
-        return burn(sim, np.array([x, y]), np.array([vx, vy]), mass, MAX_BURN_TIME)
+        return sim.burn(
+            np.array([x, y]), np.array([vx, vy]), mass, VE, THRUST, MAX_BURN_TIME
+        )
 
     res = minimize_scalar(
         start_burn_at,
@@ -229,38 +261,6 @@ def find_burn_params(time_to_apopasis, mass):
 
     print("**********  When to start burn  **********")
     print(res)
-
-
-def burn(sim, r, v, mass, max_burn_time):
-    sol = sim.solve((0, max_burn_time), r, v, mass, VE, THRUST)
-
-    # for t, state in zip(sol.t, sol.y.T):
-    #     x, y, vx, vy, mass = state
-    #     elements = orbital_elements(np.array([x, y]), np.array([vx, vy]), MU)
-    #     print(state)
-    #     print(
-    #         f't: {t}, apoapsis = {elements["apoapsis_radius"]}, periapsis = {elements["periapsis_radius"]}, mass = {mass}'
-    #     )
-
-    # print(f"{sol.y}")
-
-    def objective(t):
-        # print(f"** Burn for {t} sec")
-        return error(sol.sol(t))
-
-    res = minimize_scalar(
-        objective,
-        bounds=(0, max_burn_time),
-        method="bounded",
-        options={"xatol": 0.01},  # Find burn time to with xatol seconds.
-    )
-    print(res)
-    if res.success:
-        print(f"Burn for {res.x} sec, RMS error: {res.fun / 1000.0} km")
-        return res.fun
-    else:
-        print("Couldn't find burn time to minimze orbital error.")
-        return np.inf
 
 
 find_burn_params(TIME_TO_APOAPSIS, M0)
