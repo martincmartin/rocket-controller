@@ -462,7 +462,9 @@ def gravity_turn(conn, turn_start_alt, turn_end_alt):
     # Cut throttle once target apoapsis is reached
     vessel.control.throttle = 0.0
     conn.space_center.physics_warp_factor = 3  # 4× physics warp during coast
-    print(f"\n  ✓ Target apoapsis reached: {apoapsis():.0f} m")
+    print(
+        f"\n  ✓ Target apoapsis reached: {apoapsis():.0f} m, waiting until out of atmosphere."
+    )
 
     # Wait for solid boosters to burn out, and to be (mostly) out of the atmosphere
     while vessel.thrust > 0 or altitude() < ATMOSPHERE_ALTITUDE:
