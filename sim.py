@@ -6,9 +6,6 @@ import numpy as np
 from scipy.integrate import solve_ivp
 from scipy.optimize import minimize_scalar
 
-KERBIN_RADIUS = 600_000
-TARGET_ALTITUDE = 80_000
-
 
 @dataclass
 class Stage:
@@ -18,26 +15,6 @@ class Stage:
     initial_mass: float
 
 
-# Swivel in vacuum:
-SWIVEL = Stage(
-    ve=320 * 9.80665,  # m / sec
-    thrust=215_000.0,  # Newtons = kg m / sec^2
-    max_burn_time=46.821997702277805,
-    initial_mass=13047.876953125,  # 9840.0 mass after burn
-)
-
-# Terrier
-TERRIER = Stage(
-    ve=345 * 9.80665,  # m / sec
-    thrust=60_000.0,  # Newtons = kg m / sec^2, flow_rate=17.7341950083118 kg/sec
-    max_burn_time=112.77647255563578,
-    initial_mass=4450,  # 2450 mass after burn?
-)
-
-R3D = np.array([423509.49245169, -1031.13489835, -460228.99268734])
-V3D = np.array([1.03083505e03, -3.27490193e-01, -1.20314861e02])
-MU = 3.5316e12
-TIME_TO_APOAPSIS = 102.46951509735595
 
 """
 - Verify that, after the Swivel has burned out, the mass is 9832.493492035084 .
@@ -178,8 +155,11 @@ class Simulator:
         0.1,  # Mass within 100 grams
     ]
 
-    def __init__(self, mu):
+    def __init__(self, mu, body_radius, target_altitude, stages):
         self.mu = mu
+        self.body_radius = body_radius
+        self.target_altitude = target_altitude
+        self.stages = stages
 
     def solve(self, t_span, r, v, mass, ve=1.0, thrust=0.0):
         return solve_ivp(
@@ -192,6 +172,7 @@ class Simulator:
             dense_output=True,
         )
 
+    # Create a circularization_burn(), which can handle multiple stages.
     def burn(self, r, v, stage):
         sol = self.solve(
             (0, stage.max_burn_time), r, v, stage.initial_mass, stage.ve, stage.thrust
@@ -209,7 +190,7 @@ class Simulator:
 
         def objective(t):
             # print(f"** Burn for {t} sec")
-            return error(sol.sol(t))
+            return self.error(sol.sol(t))
 
         res = minimize_scalar(
             objective,
@@ -225,12 +206,13 @@ class Simulator:
             print("Couldn't find burn time to minimze orbital error.")
             return np.inf
 
-    def find_burn_params(self, time_to_apopasis, stage):
-        r_hat, w_hat, r, v = project(R3D, V3D)
+    def find_burn_params(self, r3d, v3d, time_to_apoapsis):
+        initial_mass = self.stages[0].initial_mass
+        r_hat, w_hat, r, v = project(r3d, v3d)
 
         # Simulate coasting (no thrust) up until apopasis.  We know we need to burn
         # before apoapsis, so that's a good upper bound on when to start burning.
-        sol = self.solve((0, time_to_apopasis), r, v, stage.initial_mass)
+        sol = self.solve((0, time_to_apoapsis), r, v, initial_mass)
 
         # print(sol.t[-1], ": ", sol.y[:, -1])
 
@@ -244,12 +226,12 @@ class Simulator:
         def start_burn_at(t):
             print(f"***** Start burn at {t}")
             x, y, vx, vy, mass = sol.sol(t)
-            assert math.isclose(mass, stage.initial_mass)
-            return self.burn(np.array([x, y]), np.array([vx, vy]), stage)
+            assert math.isclose(mass, initial_mass)
+            return self.burn(np.array([x, y]), np.array([vx, vy]), self.stages[0])
 
         res = minimize_scalar(
             start_burn_at,
-            bounds=(0, time_to_apopasis),
+            bounds=(0, time_to_apoapsis),
             method="bounded",
             options={
                 "xatol": 0.01,  # Find burn start time to within xatol seconds.
@@ -260,20 +242,46 @@ class Simulator:
         print("**********  When to start burn  **********")
         print(res)
 
+    def error(self, state):
+        elements = orbital_elements(
+            np.array([state[0], state[1]]), np.array([state[2], state[3]]), self.mu
+        )
 
-def error(state):
-    elements = orbital_elements(
-        np.array([state[0], state[1]]), np.array([state[2], state[3]]), MU
-    )
+        ap = elements["apoapsis_radius"]
+        pe = elements["periapsis_radius"]
 
-    ap = elements["apoapsis_radius"]
-    pe = elements["periapsis_radius"]
+        target = self.body_radius + self.target_altitude
 
-    target = KERBIN_RADIUS + TARGET_ALTITUDE
-
-    return math.sqrt((ap - target) ** 2 + (pe - target) ** 2 / 2)
+        return math.sqrt((ap - target) ** 2 + (pe - target) ** 2 / 2)
 
 
-sim = Simulator(MU)
+KERBIN_RADIUS = 600_000
+TARGET_ALTITUDE = 80_000
 
-sim.find_burn_params(TIME_TO_APOAPSIS, SWIVEL)
+# Swivel in vacuum:
+SWIVEL = Stage(
+    ve=320 * 9.80665,  # m / sec
+    thrust=215_000.0,  # Newtons = kg m / sec^2
+    max_burn_time=46.821997702277805,
+    initial_mass=13047.876953125,  # 9840.0 mass after burn
+)
+
+# Terrier
+TERRIER = Stage(
+    ve=345 * 9.80665,  # m / sec
+    thrust=60_000.0,  # Newtons = kg m / sec^2, flow_rate=17.7341950083118 kg/sec
+    max_burn_time=112.77647255563578,
+    initial_mass=4450,  # 2450 mass after burn?
+)
+
+MU = 3.5316e12
+
+sim = Simulator(
+    MU, body_radius=600_000, target_altitude=80_000, stages=[SWIVEL, TERRIER]
+)
+
+R3D = np.array([423509.49245169, -1031.13489835, -460228.99268734])
+V3D = np.array([1.03083505e03, -3.27490193e-01, -1.20314861e02])
+TIME_TO_APOAPSIS = 102.46951509735595
+
+sim.find_burn_params(R3D, V3D, TIME_TO_APOAPSIS)
