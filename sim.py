@@ -225,6 +225,41 @@ class Simulator:
             print("Couldn't find burn time to minimze orbital error.")
             return np.inf
 
+    def find_burn_params(self, time_to_apopasis, stage):
+        r_hat, w_hat, r, v = project(R3D, V3D)
+
+        # Simulate coasting (no thrust) up until apopasis.  We know we need to burn
+        # before apoapsis, so that's a good upper bound on when to start burning.
+        sol = self.solve((0, time_to_apopasis), r, v, stage.initial_mass)
+
+        # print(sol.t[-1], ": ", sol.y[:, -1])
+
+        # for t, state in zip(sol.t, sol.y.T):
+        #     x, y, vx, vy, mass = state
+        #     elements = orbital_elements(np.array([x, y]), np.array([vx, vy]), MU)
+        #     print(
+        #         f't: {t}, apoapsis = {elements["apoapsis_radius"]}, periapsis = {elements["periapsis_radius"]}, mass = {mass}'
+        #     )
+
+        def start_burn_at(t):
+            print(f"***** Start burn at {t}")
+            x, y, vx, vy, mass = sol.sol(t)
+            assert math.isclose(mass, stage.initial_mass)
+            return self.burn(np.array([x, y]), np.array([vx, vy]), stage)
+
+        res = minimize_scalar(
+            start_burn_at,
+            bounds=(0, time_to_apopasis),
+            method="bounded",
+            options={
+                "xatol": 0.01,  # Find burn start time to within xatol seconds.
+                "disp": 3,
+            },
+        )
+
+        print("**********  When to start burn  **********")
+        print(res)
+
 
 def error(state):
     elements = orbital_elements(
@@ -239,42 +274,6 @@ def error(state):
     return math.sqrt((ap - target) ** 2 + (pe - target) ** 2 / 2)
 
 
-def find_burn_params(time_to_apopasis, stage):
-    r_hat, w_hat, r, v = project(R3D, V3D)
+sim = Simulator(MU)
 
-    sim = Simulator(MU)
-
-    # Simulate coasting (no thrust) up until apopasis.  We know we need to burn
-    # before apoapsis, so that's a good upper bound on when to start burning.
-    sol = sim.solve((0, time_to_apopasis), r, v, stage.initial_mass)
-
-    # print(sol.t[-1], ": ", sol.y[:, -1])
-
-    # for t, state in zip(sol.t, sol.y.T):
-    #     x, y, vx, vy, mass = state
-    #     elements = orbital_elements(np.array([x, y]), np.array([vx, vy]), MU)
-    #     print(
-    #         f't: {t}, apoapsis = {elements["apoapsis_radius"]}, periapsis = {elements["periapsis_radius"]}, mass = {mass}'
-    #     )
-
-    def start_burn_at(t):
-        print(f"***** Start burn at {t}")
-        x, y, vx, vy, mass = sol.sol(t)
-        assert math.isclose(mass, stage.initial_mass)
-        return sim.burn(np.array([x, y]), np.array([vx, vy]), stage)
-
-    res = minimize_scalar(
-        start_burn_at,
-        bounds=(0, time_to_apopasis),
-        method="bounded",
-        options={
-            "xatol": 0.01,  # Find burn start time to within xatol seconds.
-            "disp": 3,
-        },
-    )
-
-    print("**********  When to start burn  **********")
-    print(res)
-
-
-find_burn_params(TIME_TO_APOAPSIS, SWIVEL)
+sim.find_burn_params(TIME_TO_APOAPSIS, SWIVEL)
