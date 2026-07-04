@@ -186,6 +186,7 @@ def burn_time(vessel, delta_v: float) -> float:
     total_time = 0.0
     m = vessel.mass  # kg
     current_stage = vessel.control.current_stage
+    print(f"Initial mass: {m} at stage: {current_stage}")
 
     # Start with the currently active engine groups.
     groups = _discover_engine_groups(vessel, active_only=True)
@@ -205,6 +206,16 @@ def burn_time(vessel, delta_v: float) -> float:
                     p.dry_mass
                     for p in vessel.parts.all
                     if p.decouple_stage == current_stage
+                )
+                print(
+                    [
+                        p.title
+                        for p in vessel.parts.all
+                        if p.decouple_stage == current_stage
+                    ]
+                )
+                print(
+                    f"During stage {current_stage} separation, dropping {drop} kg, so mass goes from {m} to {m - drop}"
                 )
                 m -= drop
                 current_stage -= 1
@@ -235,6 +246,7 @@ def burn_time(vessel, delta_v: float) -> float:
 
         # Δv available in this segment (Tsiolkovsky).
         mass_consumed = total_flow * min_dur
+        print(f"mass consumed: {mass_consumed}")
         if mass_consumed >= m:
             print(f"!!! WTF????")
             break
@@ -251,6 +263,7 @@ def burn_time(vessel, delta_v: float) -> float:
             total_time += min_dur
             remaining_dv -= dv_segment
             m -= mass_consumed
+            print(f"Mass after burn: {m}")
             groups = [g for g in groups if g.fuel_duration > min_dur + 0.001]
             for g in groups:
                 g.fuel_duration -= min_dur
@@ -509,7 +522,7 @@ def gravity_turn(conn, turn_start_alt, turn_end_alt):
     while ut() < burn_ut:
         time_remaining = burn_ut - ut()
         print(
-            f"\r  Burn in {time_remaining:>6.1f} s, apopasis={apoapsis()}   ",
+            f"\r  Burn in {time_remaining:>6.1f} s, apopasis={apoapsis()}, mass={vessel.mass}   ",
             end="",
             flush=True,
         )
@@ -556,7 +569,7 @@ def gravity_turn(conn, turn_start_alt, turn_end_alt):
 
         prev_pe = pe
         print(
-            f"\r  Periapsis: {pe:>10,.0f} m  (target: {TARGET_ALTITUDE:,} m)   ",
+            f"\r  Periapsis: {pe:>10,.0f} m  (target: {TARGET_ALTITUDE:,} m), mass: {vessel.mass}   ",
             end="",
             flush=True,
         )
