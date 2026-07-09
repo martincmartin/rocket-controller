@@ -104,7 +104,6 @@ def orbital_elements(r, v, mu):
         {
             'semi_major_axis': a,
             'eccentricity': e,
-            'eccentricity_vector': e_vec,
             'angular_momentum': h,
             'specific_energy': energy,
             'periapsis_radius': rp,
@@ -118,13 +117,10 @@ def orbital_elements(r, v, mu):
     # Scalar angular momentum (z-component)
     h = cross2d(r, v)
 
-    # Eccentricity vector
-    v_perp = np.array([v[1], -v[0]])
-    e_vec = (h / mu) * v_perp - r / r_mag
-    e = np.linalg.norm(e_vec)
-
     # Specific orbital energy
     energy = 0.5 * v_mag**2 - mu / r_mag
+
+    e = math.sqrt(1 + 2 * energy * h * h / (mu * mu))
 
     # Semi-major axis
     if np.isclose(energy, 0.0):
@@ -144,7 +140,6 @@ def orbital_elements(r, v, mu):
     return {
         "semi_major_axis": a,
         "eccentricity": e,
-        "eccentricity_vector": e_vec,
         "angular_momentum": h,
         "specific_energy": energy,
         "periapsis_radius": rp,
