@@ -465,11 +465,11 @@ sim = Simulator(
 
 @dataclass
 class DynamicsTestState:
-    r3d: np.array
-    v3d: np.array
+    r3d: np.ndarray
+    v3d: np.ndarray
     elapsed: float
     apopasis: float
-    periapsis: flaot
+    periapsis: float
     mass: float
 
 
