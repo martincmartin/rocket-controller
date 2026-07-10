@@ -57,8 +57,24 @@ def project(r, v):
 
 
 def to_arrays(state):
-    x, y, vx, vy, mass = state
-    return (np.array([x, y]), np.array([vx, vy]), mass)
+    if len(state) == 4:
+        x, y, vx, vy = state
+        return (np.array([x, y]), np.array([vx, vy]))
+    elif len(state) == 5:
+        x, y, vx, vy, mass = state
+        return (np.array([x, y]), np.array([vx, vy]), mass)
+
+
+def coast_dynamics(t, state, mu):
+    r, v = to_arrays(state)
+
+    # This is just a = F/m.
+    r_norm = np.linalg.norm(r)
+
+    # Acceleration due to gravity.
+    a = -mu / r_norm**3 * r
+
+    return [v[0], v[1], a[0], a[1]]
 
 
 def prograde_dynamics(t, state, mu, ve, thrust):
@@ -82,6 +98,44 @@ def prograde_dynamics(t, state, mu, ve, thrust):
         mdot = 0
 
     # print(f"{a=}, {mdot=}")
+    return [v[0], v[1], a[0], a[1], mdot]
+
+
+def linear_tangent_dynamics(t, state, mu, ve, thrust, a_coeff, b_coeff, ref_angle):
+    """Equations of motion with thrust direction given by a linear tangent steering law.
+
+    The thrust angle relative to ref_angle is:
+        θ = ref_angle + atan(a_coeff + b_coeff * t)
+
+    Parameters
+    ----------
+    t : float
+        Time [s]
+    state : array_like
+        [x, y, vx, vy, mass]
+    mu : float
+        Gravitational parameter [m^3/s^2]
+    ve : float
+        Effective exhaust velocity [m/s]
+    thrust : float
+        Thrust magnitude [N]
+    a_coeff, b_coeff : float
+        Linear tangent coefficients: tan(θ) = a_coeff + b_coeff * t
+    ref_angle : float
+        Inertial reference angle [rad] for θ = 0 (typically the horizontal
+        direction at apoapsis, precomputed before the burn).
+    """
+    r, v, mass = to_arrays(state)
+
+    r_norm = np.linalg.norm(r)
+
+    a = -mu / r_norm**3 * r
+
+    theta = ref_angle + math.atan(a_coeff + b_coeff * t)
+    thrust_dir = np.array([math.cos(theta), math.sin(theta)])
+    a += (thrust / mass) * thrust_dir
+    mdot = -thrust / ve
+
     return [v[0], v[1], a[0], a[1], mdot]
 
 
@@ -148,9 +202,9 @@ def orbital_elements(r, v, mu):
 
 
 class Simulator:
-    """Prograde-burn orbital simulation."""
+    """Orbital simulation."""
 
-    ATOL_VECTOR = [
+    ATOL_THRUST_VECTOR = [
         1.0,  # Position within 1 meter.
         1.0,
         0.001,  # Velocity within 0.001 meters / sec
@@ -158,25 +212,44 @@ class Simulator:
         0.1,  # Mass within 100 grams
     ]
 
+    ATOL_COAST_VECTOR = ATOL_THRUST_VECTOR[:-1]
+
     def __init__(self, mu, body_radius, target_altitude, stages):
         self.mu = mu
         self.target_radius = body_radius + target_altitude
         self.stages = stages
 
-    def solve(self, t_span, r, v, mass=1.0, ve=1.0, thrust=0.0):
+    def solve_coast(self, t_span, r, v):
         return solve_ivp(
-            prograde_dynamics,
+            coast_dynamics,
             t_span,
-            (r[0], r[1], v[0], v[1], mass),
-            args=(self.mu, ve, thrust),
+            (r[0], r[1], v[0], v[1]),
+            args=(self.mu,),
             rtol=1e-10,
-            atol=self.ATOL_VECTOR,
+            atol=self.ATOL_COAST_VECTOR,
             dense_output=True,
         )
 
-    def solve_stage(self, r, v, stage):
-        return self.solve(
-            (0, stage.max_burn_time), r, v, stage.initial_mass, stage.ve, stage.thrust
+    def solve_linear_tangent(self, r, v, stage, a_coeff, b_coeff, ref_angle):
+        return solve_ivp(
+            linear_tangent_dynamics,
+            (0, stage.max_burn_time),
+            (r[0], r[1], v[0], v[1], stage.initial_mass),
+            args=(self.mu, stage.ve, stage.thrust, a_coeff, b_coeff, ref_angle),
+            rtol=1e-10,
+            atol=self.ATOL_THRUST_VECTOR,
+            dense_output=True,
+        )
+
+    def solve_prograde(self, r, v, stage):
+        return solve_ivp(
+            prograde_dynamics,
+            (0, stage.max_burn_time),
+            (r[0], r[1], v[0], v[1], stage.initial_mass),
+            args=(self.mu, stage.ve, stage.thrust),
+            rtol=1e-10,
+            atol=self.ATOL_THRUST_VECTOR,
+            dense_output=True,
         )
 
     # Returns error?
@@ -190,7 +263,7 @@ class Simulator:
         # Iterate over stages to find the one where we'll achieve our periapsis
         # goal.
         for stage in self.stages:
-            solution = self.solve_stage(r, v, stage)
+            solution = self.solve_prograde(r, v, stage)
 
             # for t, state in zip(sol.t, sol.y.T):
             #     x, y, vx, vy, mass = state
@@ -214,8 +287,8 @@ class Simulator:
                 f"Stage {stage.name} will only raise periapsis to { orbit["periapsis_radius"]}, which is below target of {self.target_radius}"
             )
             # Simulate staging as a 1 second coast.
-            solution = self.solve((0, 1.0), r, v)
-            r, v, _ = to_arrays(solution.y[:, -1])
+            solution = self.solve_coast((0, 1.0), r, v)
+            r, v = to_arrays(solution.y[:, -1])
 
         return np.inf
 
@@ -247,6 +320,14 @@ class Simulator:
             print("Couldn't find burn time to minimze orbital error.")
             return np.inf
 
+    def find_linear_tangent_params(self, r3d, v3d, time_to_apoapsis):
+        initial_mass = self.stages[0].initial_mass
+        r_hat, w_hat, r, v = project(r3d, v3d)
+
+        # Simulate coasting (no thrust) up until apopasis.  We know we need to burn
+        # before apoapsis, so that's a good upper bound on when to start burning.
+        sol = self.solve_coast((0, time_to_apoapsis), r, v)
+
     # INITIAL ENTRY POINT.
     def find_burn_params(self, r3d, v3d, time_to_apoapsis):
         initial_mass = self.stages[0].initial_mass
@@ -254,7 +335,7 @@ class Simulator:
 
         # Simulate coasting (no thrust) up until apopasis.  We know we need to burn
         # before apoapsis, so that's a good upper bound on when to start burning.
-        sol = self.solve((0, time_to_apoapsis), r, v)
+        sol = self.solve_coast((0, time_to_apoapsis), r, v)
 
         # print(sol.t[-1], ": ", sol.y[:, -1])
 
@@ -267,7 +348,7 @@ class Simulator:
 
         def start_burn_at(t):
             print(f"***** Simulating starting the burn at {t}")
-            r, v, _ = to_arrays(sol.sol(t))
+            r, v = to_arrays(sol.sol(t))
             return self.circularization_burn(r, v)
 
         for t in np.linspace(0, time_to_apoapsis, 100):
@@ -287,7 +368,7 @@ class Simulator:
         print("**********  When to start burn  **********")
         print(res)
 
-        r, v, _ = to_arrays(sol.sol(res.x))
+        r, v = to_arrays(sol.sol(res.x))
         print(f"altitude: {np.linalg.norm(r) - KERBIN_RADIUS}")
 
     def error(self, state):
@@ -378,13 +459,11 @@ def test():
 
     np.testing.assert_allclose(full(r), start.r3d)
 
-    solution = sim.solve((start.elapsed, finish.elapsed), r, v)
+    solution = sim.solve_coast((start.elapsed, finish.elapsed), r, v)
     assert math.isclose(solution.t[-1], finish.elapsed)
-    end_r, end_v, _ = to_arrays(solution.y[:, -1])
+    end_r, end_v = to_arrays(solution.y[:, -1])
     np.testing.assert_allclose(full(end_r), finish.r3d, atol=0.5)
     np.testing.assert_allclose(full(end_v), finish.v3d, atol=0.2)
-
-    # soluiton = self.solve(
 
 
 test()
