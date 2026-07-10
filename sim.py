@@ -252,7 +252,8 @@ class Simulator:
             dense_output=True,
         )
 
-    # Returns error?
+    # I guess create a version on this for linear_tangent?
+    # Returns error?  This is after the coast, starts with the actual burn.
     def circularization_burn(self, r, v):
 
         # If our periapsis is already at or above target, there's nothing to do.
