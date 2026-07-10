@@ -1,9 +1,7 @@
 #!/usr/bin/env python3
 
 import math
-import sys
 from dataclasses import dataclass
-from typing import Union
 import numpy as np
 from pydantic import ConfigDict, validate_call
 from scipy.integrate import solve_ivp
@@ -149,7 +147,7 @@ def linear_tangent_dynamics(t: float, state: np.ndarray, mu: float, ve: float, t
 
 
 @_validate
-def orbital_elements(r: np.ndarray, v: np.ndarray, mu: float) -> dict[str, float]:
+def orbital_elements(r: np.ndarray, v: np.ndarray, mu: float) -> dict[str, float | np.ndarray]:
     """
     Compute orbital elements from 2D position and velocity vectors.
 
@@ -168,6 +166,7 @@ def orbital_elements(r: np.ndarray, v: np.ndarray, mu: float) -> dict[str, float
         {
             'semi_major_axis': a,
             'eccentricity': e,
+            'eccentricity_vector': e_vec,
             'angular_momentum': h,
             'specific_energy': energy,
             'periapsis_radius': rp,
@@ -184,7 +183,10 @@ def orbital_elements(r: np.ndarray, v: np.ndarray, mu: float) -> dict[str, float
     # Specific orbital energy
     energy = 0.5 * v_mag**2 - mu / r_mag
 
-    e = math.sqrt(1 + 2 * energy * h * h / (mu * mu))
+    # Eccentricity vector: e_vec = (h/mu) * v_perp - r_hat
+    v_perp = np.array([v[1], -v[0]])
+    e_vec = (h / mu) * v_perp - r / r_mag
+    e = np.linalg.norm(e_vec)
 
     # Semi-major axis
     if np.isclose(energy, 0.0):
@@ -204,6 +206,7 @@ def orbital_elements(r: np.ndarray, v: np.ndarray, mu: float) -> dict[str, float
     return {
         "semi_major_axis": a,
         "eccentricity": e,
+        "eccentricity_vector": e_vec,
         "angular_momentum": h,
         "specific_energy": energy,
         "periapsis_radius": rp,
@@ -278,7 +281,6 @@ class Simulator:
             dense_output=True,
         )
 
-    # I guess create a version on this for linear_tangent
     # Returns error?  This is after the coast, starts with the actual burn.
     @_validate
     def circularization_burn(self, r: np.ndarray, v: np.ndarray) -> float:
@@ -362,6 +364,19 @@ class Simulator:
         # before apoapsis, so that's a good upper bound on when to start burning.
         sol = self.solve_coast((0, time_to_apoapsis), r, v)
         assert sol.sol is not None
+        coast_fn = sol.sol
+
+        @_validate
+        def to_orbit(params, blah) -> float:
+            coast_time, a, b = params
+            r, v = to_rv(coast_fn(coast_time))
+
+            # TODO: start here, look at circularization_burn.
+
+            # Make sure we haven't already raised our periapsis.
+            orbit = orbital_elements(r, v, self.mu)
+            assert orbit["periapsis_radius"] < self.target_radius
+            return 0.0  # TODO: implement
 
     # INITIAL ENTRY POINT.
     @_validate
@@ -508,6 +523,89 @@ def test():
 
 
 test()
+
+
+def test_orbital_elements():
+    mu = 3.5316e12  # Kerbin
+
+    # --- Circular orbit ---
+    # At radius R with circular velocity v_c = sqrt(mu/R), e=0, a=R
+    R = 680_000.0  # 80 km altitude
+    v_c = math.sqrt(mu / R)
+    # Position along +x, velocity along +y (prograde)
+    elems = orbital_elements(np.array([R, 0.0]), np.array([0.0, v_c]), mu)
+    assert math.isclose(elems["eccentricity"], 0.0, abs_tol=1e-10), f"e={elems['eccentricity']}"
+    assert math.isclose(elems["semi_major_axis"], R, rel_tol=1e-10), f"a={elems['semi_major_axis']}"
+    assert math.isclose(elems["periapsis_radius"], R, rel_tol=1e-10), f"rp={elems['periapsis_radius']}"
+    assert math.isclose(elems["apoapsis_radius"], R, rel_tol=1e-10), f"ra={elems['apoapsis_radius']}"
+    assert math.isclose(elems["angular_momentum"], R * v_c, rel_tol=1e-10)
+    # Eccentricity vector should be ~zero
+    np.testing.assert_allclose(elems["eccentricity_vector"], [0.0, 0.0], atol=1e-10)
+    print("  ✓ Circular orbit")
+
+    # --- Elliptical orbit at periapsis ---
+    # At periapsis: r = rp, velocity is purely tangential
+    # For a known a and e: rp = a(1-e), ra = a(1+e), v_p = sqrt(mu * (2/rp - 1/a))
+    a = 750_000.0
+    e = 0.1
+    rp = a * (1 - e)
+    ra = a * (1 + e)
+    v_p = math.sqrt(mu * (2.0 / rp - 1.0 / a))
+    elems = orbital_elements(np.array([rp, 0.0]), np.array([0.0, v_p]), mu)
+    assert math.isclose(elems["eccentricity"], e, rel_tol=1e-10), f"e={elems['eccentricity']}"
+    assert math.isclose(elems["semi_major_axis"], a, rel_tol=1e-10), f"a={elems['semi_major_axis']}"
+    assert math.isclose(elems["periapsis_radius"], rp, rel_tol=1e-10), f"rp={elems['periapsis_radius']}"
+    assert math.isclose(elems["apoapsis_radius"], ra, rel_tol=1e-10), f"ra={elems['apoapsis_radius']}"
+    # At periapsis, eccentricity vector points along +x (toward periapsis)
+    e_vec = elems["eccentricity_vector"]
+    assert math.isclose(e_vec[0], e, abs_tol=1e-10), f"e_vec[0]={e_vec[0]}"
+    assert math.isclose(e_vec[1], 0.0, abs_tol=1e-10), f"e_vec[1]={e_vec[1]}"
+    print("  ✓ Elliptical orbit at periapsis")
+
+    # --- Elliptical orbit at apoapsis ---
+    # At apoapsis: r = ra, velocity is purely tangential but slower
+    v_a = math.sqrt(mu * (2.0 / ra - 1.0 / a))
+    # At apoapsis along +x, velocity is -y (going clockwise)
+    elems = orbital_elements(np.array([ra, 0.0]), np.array([0.0, -v_a]), mu)
+    assert math.isclose(elems["eccentricity"], e, rel_tol=1e-10), f"e={elems['eccentricity']}"
+    assert math.isclose(elems["semi_major_axis"], a, rel_tol=1e-10), f"a={elems['semi_major_axis']}"
+    assert math.isclose(elems["periapsis_radius"], rp, rel_tol=1e-10), f"rp={elems['periapsis_radius']}"
+    assert math.isclose(elems["apoapsis_radius"], ra, rel_tol=1e-10), f"ra={elems['apoapsis_radius']}"
+    # At apoapsis along +x, eccentricity vector points toward periapsis (-x)
+    e_vec = elems["eccentricity_vector"]
+    assert math.isclose(e_vec[0], -e, abs_tol=1e-10), f"e_vec[0]={e_vec[0]}"
+    assert math.isclose(e_vec[1], 0.0, abs_tol=1e-10), f"e_vec[1]={e_vec[1]}"
+    print("  ✓ Elliptical orbit at apoapsis")
+
+    # --- Hyperbolic orbit ---
+    # At periapsis with v > escape velocity
+    v_esc = math.sqrt(2 * mu / R)
+    v_hyp = v_esc * 1.2  # 20% above escape velocity
+    elems = orbital_elements(np.array([R, 0.0]), np.array([0.0, v_hyp]), mu)
+    assert elems["eccentricity"] > 1.0, f"e={elems['eccentricity']}"
+    assert elems["semi_major_axis"] < 0, f"a={elems['semi_major_axis']} (should be negative)"
+    assert math.isclose(elems["periapsis_radius"], R, rel_tol=1e-6), f"rp={elems['periapsis_radius']}"
+    assert elems["apoapsis_radius"] == np.inf, f"ra={elems['apoapsis_radius']}"
+    assert elems["specific_energy"] > 0, "energy should be positive for hyperbolic"
+    print("  ✓ Hyperbolic orbit")
+
+    # --- Rotated elliptical orbit ---
+    # Same ellipse as before but rotated 90°: periapsis along +y
+    elems = orbital_elements(np.array([0.0, rp]), np.array([-v_p, 0.0]), mu)
+    assert math.isclose(elems["eccentricity"], e, rel_tol=1e-10), f"e={elems['eccentricity']}"
+    assert math.isclose(elems["semi_major_axis"], a, rel_tol=1e-10)
+    assert math.isclose(elems["periapsis_radius"], rp, rel_tol=1e-10)
+    assert math.isclose(elems["apoapsis_radius"], ra, rel_tol=1e-10)
+    # Eccentricity vector should point along +y
+    e_vec = elems["eccentricity_vector"]
+    assert math.isclose(e_vec[0], 0.0, abs_tol=1e-10), f"e_vec[0]={e_vec[0]}"
+    assert math.isclose(e_vec[1], e, abs_tol=1e-10), f"e_vec[1]={e_vec[1]}"
+    print("  ✓ Rotated elliptical orbit")
+
+    print("All orbital_elements tests passed!")
+
+
+test_orbital_elements()
 
 
 R3D = np.array([428392.15435586, -1053.61873734, -455905.93323801])
