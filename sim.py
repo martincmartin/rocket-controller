@@ -74,7 +74,7 @@ def to_rvm(state) -> tuple[np.ndarray, np.ndarray, float]:
     return (np.array([x, y]), np.array([vx, vy]), mass)
 
 
-def coast_dynamics(t: float, state: list[float], mu: float) -> list[float]:
+def coast_dynamics(t: float, state: np.ndarray, mu: float) -> list[float]:
     r, v = to_rv(state)
 
     # This is just a = F/m.
@@ -86,9 +86,7 @@ def coast_dynamics(t: float, state: list[float], mu: float) -> list[float]:
     return [v[0], v[1], a[0], a[1]]
 
 
-def prograde_dynamics(
-    t: float, state: list[float], mu: float, ve: float, thrust: float
-) -> list[float]:
+def prograde_dynamics(t: float, state: np.ndarray, mu: float, ve: float, thrust: float) -> list[float]:
     r, v, mass = to_rvm(state)
     # print(f"***** In prograde_dynamcs, {t=}")
     # print(f"{r=}, {v=}, {mass=}")
@@ -112,16 +110,7 @@ def prograde_dynamics(
     return [v[0], v[1], a[0], a[1], mdot]
 
 
-def linear_tangent_dynamics(
-    t: float,
-    state: list[float],
-    mu: float,
-    ve: float,
-    thrust: float,
-    a_coeff: float,
-    b_coeff: float,
-    ref_angle: float,
-) -> list[float]:
+def linear_tangent_dynamics(t: float, state: np.ndarray, mu: float, ve: float, thrust: float, a_coeff: float, b_coeff: float, ref_angle: float) -> list[float]:
     """Equations of motion with thrust direction given by a linear tangent steering law.
 
     The thrust angle relative to ref_angle is:
@@ -289,7 +278,7 @@ class Simulator:
             dense_output=True,
         )
 
-    # I guess create a version on this for linear_tangent?
+    # I guess create a version on this for linear_tangent
     # Returns error?  This is after the coast, starts with the actual burn.
     @_validate
     def circularization_burn(self, r: np.ndarray, v: np.ndarray) -> float:
@@ -334,10 +323,12 @@ class Simulator:
     # Returns error() value at the minimum burn time.
     @_validate
     def find_burn_time(self, solution: OdeResult, stage: Stage) -> float:
+        assert solution.sol is not None
+        sol_fn = solution.sol
 
         def objective(t):
             # print(f"** Burn for {t} sec")
-            return self.error(solution.sol(t))
+            return self.error(sol_fn(t))
 
         res = minimize_scalar(
             objective,
@@ -348,7 +339,7 @@ class Simulator:
         print(res)
         if res.success:
             print(f"Burn for {res.x} sec, RMS error: {res.fun / 1000.0} km")
-            r, v, _ = to_rvm(solution.sol(res.x))
+            r, v, _ = to_rvm(sol_fn(res.x))
             elements = orbital_elements(r, v, self.mu)
 
             ap = elements["apoapsis_radius"]
@@ -370,6 +361,7 @@ class Simulator:
         # Simulate coasting (no thrust) up until apopasis.  We know we need to burn
         # before apoapsis, so that's a good upper bound on when to start burning.
         sol = self.solve_coast((0, time_to_apoapsis), r, v)
+        assert sol.sol is not None
 
     # INITIAL ENTRY POINT.
     @_validate
@@ -382,6 +374,8 @@ class Simulator:
         # Simulate coasting (no thrust) up until apopasis.  We know we need to burn
         # before apoapsis, so that's a good upper bound on when to start burning.
         sol = self.solve_coast((0, time_to_apoapsis), r, v)
+        assert sol.sol is not None
+        sol_fn = sol.sol
 
         # print(sol.t[-1], ": ", sol.y[:, -1])
 
@@ -394,7 +388,7 @@ class Simulator:
 
         def start_burn_at(t):
             print(f"***** Simulating starting the burn at {t}")
-            r, v = to_rv(sol.sol(t))
+            r, v = to_rv(sol_fn(t))
             return self.circularization_burn(r, v)
 
         for t in np.linspace(0, time_to_apoapsis, 100):
@@ -414,7 +408,7 @@ class Simulator:
         print("**********  When to start burn  **********")
         print(res)
 
-        r, v = to_rv(sol.sol(res.x))
+        r, v = to_rv(sol_fn(res.x))
         print(f"altitude: {np.linalg.norm(r) - KERBIN_RADIUS}")
 
     @_validate
