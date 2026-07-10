@@ -3,9 +3,14 @@
 import math
 import sys
 from dataclasses import dataclass
+from typing import Union
 import numpy as np
+from pydantic import ConfigDict, validate_call
 from scipy.integrate import solve_ivp
+from scipy.integrate._ivp.ivp import OdeResult
 from scipy.optimize import minimize_scalar
+
+_validate = validate_call(config=ConfigDict(arbitrary_types_allowed=True))
 
 KERBIN_RADIUS = 600_000
 
@@ -26,11 +31,14 @@ class Stage:
 """
 
 
-def cross2d(r, v):
+def cross2d(r: np.ndarray, v: np.ndarray) -> float:
     return r[0] * v[1] - r[1] * v[0]
 
 
-def project(r, v):
+@_validate
+def project(
+    r: np.ndarray, v: np.ndarray
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
     # r = 0 means at the center of the body; since we're above the surface,
     # r should never be close to zero, so we can divide with confidence.
     r_norm = np.linalg.norm(r)
@@ -56,17 +64,18 @@ def project(r, v):
     return (r_hat, w_hat, r_projected, v_projected)
 
 
-def to_arrays(state):
-    if len(state) == 4:
-        x, y, vx, vy = state
-        return (np.array([x, y]), np.array([vx, vy]))
-    elif len(state) == 5:
-        x, y, vx, vy, mass = state
-        return (np.array([x, y]), np.array([vx, vy]), mass)
+def to_rv(state) -> tuple[np.ndarray, np.ndarray]:
+    x, y, vx, vy = state
+    return (np.array([x, y]), np.array([vx, vy]))
 
 
-def coast_dynamics(t, state, mu):
-    r, v = to_arrays(state)
+def to_rvm(state) -> tuple[np.ndarray, np.ndarray, float]:
+    x, y, vx, vy, mass = state
+    return (np.array([x, y]), np.array([vx, vy]), mass)
+
+
+def coast_dynamics(t: float, state: list[float], mu: float) -> list[float]:
+    r, v = to_rv(state)
 
     # This is just a = F/m.
     r_norm = np.linalg.norm(r)
@@ -77,8 +86,10 @@ def coast_dynamics(t, state, mu):
     return [v[0], v[1], a[0], a[1]]
 
 
-def prograde_dynamics(t, state, mu, ve, thrust):
-    r, v, mass = to_arrays(state)
+def prograde_dynamics(
+    t: float, state: list[float], mu: float, ve: float, thrust: float
+) -> list[float]:
+    r, v, mass = to_rvm(state)
     # print(f"***** In prograde_dynamcs, {t=}")
     # print(f"{r=}, {v=}, {mass=}")
 
@@ -101,7 +112,16 @@ def prograde_dynamics(t, state, mu, ve, thrust):
     return [v[0], v[1], a[0], a[1], mdot]
 
 
-def linear_tangent_dynamics(t, state, mu, ve, thrust, a_coeff, b_coeff, ref_angle):
+def linear_tangent_dynamics(
+    t: float,
+    state: list[float],
+    mu: float,
+    ve: float,
+    thrust: float,
+    a_coeff: float,
+    b_coeff: float,
+    ref_angle: float,
+) -> list[float]:
     """Equations of motion with thrust direction given by a linear tangent steering law.
 
     The thrust angle relative to ref_angle is:
@@ -125,7 +145,7 @@ def linear_tangent_dynamics(t, state, mu, ve, thrust, a_coeff, b_coeff, ref_angl
         Inertial reference angle [rad] for θ = 0 (typically the horizontal
         direction at apoapsis, precomputed before the burn).
     """
-    r, v, mass = to_arrays(state)
+    r, v, mass = to_rvm(state)
 
     r_norm = np.linalg.norm(r)
 
@@ -139,7 +159,8 @@ def linear_tangent_dynamics(t, state, mu, ve, thrust, a_coeff, b_coeff, ref_angl
     return [v[0], v[1], a[0], a[1], mdot]
 
 
-def orbital_elements(r, v, mu):
+@_validate
+def orbital_elements(r: np.ndarray, v: np.ndarray, mu: float) -> dict[str, float]:
     """
     Compute orbital elements from 2D position and velocity vectors.
 
@@ -214,12 +235,18 @@ class Simulator:
 
     ATOL_COAST_VECTOR = ATOL_THRUST_VECTOR[:-1]
 
-    def __init__(self, mu, body_radius, target_altitude, stages):
+    @_validate
+    def __init__(
+        self, mu: float, body_radius: float, target_altitude: float, stages: list[Stage]
+    ) -> None:
         self.mu = mu
         self.target_radius = body_radius + target_altitude
         self.stages = stages
 
-    def solve_coast(self, t_span, r, v):
+    @_validate
+    def solve_coast(
+        self, t_span: tuple[float, float], r: np.ndarray, v: np.ndarray
+    ) -> OdeResult:
         return solve_ivp(
             coast_dynamics,
             t_span,
@@ -230,7 +257,16 @@ class Simulator:
             dense_output=True,
         )
 
-    def solve_linear_tangent(self, r, v, stage, a_coeff, b_coeff, ref_angle):
+    @_validate
+    def solve_linear_tangent(
+        self,
+        r: np.ndarray,
+        v: np.ndarray,
+        stage: Stage,
+        a_coeff: float,
+        b_coeff: float,
+        ref_angle: float,
+    ) -> OdeResult:
         return solve_ivp(
             linear_tangent_dynamics,
             (0, stage.max_burn_time),
@@ -241,7 +277,8 @@ class Simulator:
             dense_output=True,
         )
 
-    def solve_prograde(self, r, v, stage):
+    @_validate
+    def solve_prograde(self, r: np.ndarray, v: np.ndarray, stage: Stage) -> OdeResult:
         return solve_ivp(
             prograde_dynamics,
             (0, stage.max_burn_time),
@@ -254,7 +291,8 @@ class Simulator:
 
     # I guess create a version on this for linear_tangent?
     # Returns error?  This is after the coast, starts with the actual burn.
-    def circularization_burn(self, r, v):
+    @_validate
+    def circularization_burn(self, r: np.ndarray, v: np.ndarray) -> float:
 
         # If our periapsis is already at or above target, there's nothing to do.
 
@@ -276,7 +314,7 @@ class Simulator:
 
             # print(f"{solution.y}")
 
-            r, v, _ = to_arrays(solution.y[:, -1])
+            r, v, _ = to_rvm(solution.y[:, -1])
             orbit = orbital_elements(r, v, self.mu)
             if orbit["periapsis_radius"] >= self.target_radius:
                 print(f"Stage {stage.name} will hit periapsis target.")
@@ -289,12 +327,13 @@ class Simulator:
             )
             # Simulate staging as a 1 second coast.
             solution = self.solve_coast((0, 1.0), r, v)
-            r, v = to_arrays(solution.y[:, -1])
+            r, v = to_rv(solution.y[:, -1])
 
         return np.inf
 
     # Returns error() value at the minimum burn time.
-    def find_burn_time(self, solution, stage):
+    @_validate
+    def find_burn_time(self, solution: OdeResult, stage: Stage) -> float:
 
         def objective(t):
             # print(f"** Burn for {t} sec")
@@ -309,7 +348,7 @@ class Simulator:
         print(res)
         if res.success:
             print(f"Burn for {res.x} sec, RMS error: {res.fun / 1000.0} km")
-            r, v, _ = to_arrays(solution.sol(res.x))
+            r, v, _ = to_rvm(solution.sol(res.x))
             elements = orbital_elements(r, v, self.mu)
 
             ap = elements["apoapsis_radius"]
@@ -321,7 +360,10 @@ class Simulator:
             print("Couldn't find burn time to minimze orbital error.")
             return np.inf
 
-    def find_linear_tangent_params(self, r3d, v3d, time_to_apoapsis):
+    @_validate
+    def find_linear_tangent_params(
+        self, r3d: np.ndarray, v3d: np.ndarray, time_to_apoapsis: float
+    ) -> None:
         initial_mass = self.stages[0].initial_mass
         r_hat, w_hat, r, v = project(r3d, v3d)
 
@@ -330,7 +372,10 @@ class Simulator:
         sol = self.solve_coast((0, time_to_apoapsis), r, v)
 
     # INITIAL ENTRY POINT.
-    def find_burn_params(self, r3d, v3d, time_to_apoapsis):
+    @_validate
+    def find_burn_params(
+        self, r3d: np.ndarray, v3d: np.ndarray, time_to_apoapsis: float
+    ) -> None:
         initial_mass = self.stages[0].initial_mass
         r_hat, w_hat, r, v = project(r3d, v3d)
 
@@ -349,7 +394,7 @@ class Simulator:
 
         def start_burn_at(t):
             print(f"***** Simulating starting the burn at {t}")
-            r, v = to_arrays(sol.sol(t))
+            r, v = to_rv(sol.sol(t))
             return self.circularization_burn(r, v)
 
         for t in np.linspace(0, time_to_apoapsis, 100):
@@ -369,11 +414,12 @@ class Simulator:
         print("**********  When to start burn  **********")
         print(res)
 
-        r, v = to_arrays(sol.sol(res.x))
+        r, v = to_rv(sol.sol(res.x))
         print(f"altitude: {np.linalg.norm(r) - KERBIN_RADIUS}")
 
-    def error(self, state):
-        r, v, _ = to_arrays(state)
+    @_validate
+    def error(self, state) -> float:
+        r, v, _ = to_rvm(state)
         elements = orbital_elements(r, v, self.mu)
 
         ap = elements["apoapsis_radius"]
@@ -462,7 +508,7 @@ def test():
 
     solution = sim.solve_coast((start.elapsed, finish.elapsed), r, v)
     assert math.isclose(solution.t[-1], finish.elapsed)
-    end_r, end_v = to_arrays(solution.y[:, -1])
+    end_r, end_v = to_rv(solution.y[:, -1])
     np.testing.assert_allclose(full(end_r), finish.r3d, atol=0.5)
     np.testing.assert_allclose(full(end_v), finish.v3d, atol=0.2)
 
