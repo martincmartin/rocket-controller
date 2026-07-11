@@ -193,7 +193,7 @@ def orbital_elements(
     r_mag = np.linalg.norm(r)
     v_mag = np.linalg.norm(v)
 
-    # Scalar angular momentum (z-component)
+    # Scalar specific angular momentum (z-component)
     h = cross2d(r, v)
 
     # Specific orbital energy
@@ -400,7 +400,7 @@ class Simulator:
         # Find the prograde direction at apoapsis
         orbit = orbital_elements(r, v, self.mu)
 
-        angle_rad = prograde_at_apoapsis(orbit)
+        ref_angle = prograde_at_apoapsis(orbit)
 
         # Our goal is to raise periapsis to get us into orbit.  So periapsis
         # should be below tart or someone is very confused.
@@ -412,16 +412,21 @@ class Simulator:
         assert sol.sol is not None
         coast_fn = sol.sol
 
+        # Returns error.
         @_validate
         def to_orbit(params, blah) -> float:
-            coast_time, a, b = params
+            coast_time, a_coeff, b_coeff = params
             r, v = to_rv(coast_fn(coast_time))
 
-            # TODO: start here, look at circularization_burn.
+            # Iterate over stages to find the one where we'll achieve our periapsis
+            # goal.
+            for stage in self.stages:
+                solution = self.solve_linear_tangent(
+                    r, v, stage, a_coeff, b_coeff, ref_angle
+                )
 
-            # Make sure we haven't already raised our periapsis.
-            orbit = orbital_elements(r, v, self.mu)
-            assert orbit["periapsis_radius"] < self.target_radius
+                # TODO: start here, look at circularization_burn.
+
             return 0.0  # TODO: implement
 
     # INITIAL ENTRY POINT.
