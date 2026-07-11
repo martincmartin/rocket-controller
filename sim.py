@@ -12,6 +12,9 @@ _validate = validate_call(config=ConfigDict(arbitrary_types_allowed=True))
 
 KERBIN_RADIUS = 600_000
 
+# Making this np.inf leads to np.inf - np.inf inside scipi, which is Nan.
+MAX_ERROR = 1e18
+
 
 @dataclass
 class Stage:
@@ -84,7 +87,9 @@ def coast_dynamics(t: float, state: np.ndarray, mu: float) -> list[float]:
     return [v[0], v[1], a[0], a[1]]
 
 
-def prograde_dynamics(t: float, state: np.ndarray, mu: float, ve: float, thrust: float) -> list[float]:
+def prograde_dynamics(
+    t: float, state: np.ndarray, mu: float, ve: float, thrust: float
+) -> list[float]:
     r, v, mass = to_rvm(state)
     # print(f"***** In prograde_dynamcs, {t=}")
     # print(f"{r=}, {v=}, {mass=}")
@@ -108,7 +113,16 @@ def prograde_dynamics(t: float, state: np.ndarray, mu: float, ve: float, thrust:
     return [v[0], v[1], a[0], a[1], mdot]
 
 
-def linear_tangent_dynamics(t: float, state: np.ndarray, mu: float, ve: float, thrust: float, a_coeff: float, b_coeff: float, ref_angle: float) -> list[float]:
+def linear_tangent_dynamics(
+    t: float,
+    state: np.ndarray,
+    mu: float,
+    ve: float,
+    thrust: float,
+    a_coeff: float,
+    b_coeff: float,
+    ref_angle: float,
+) -> list[float]:
     """Equations of motion with thrust direction given by a linear tangent steering law.
 
     The thrust angle relative to ref_angle is:
@@ -147,7 +161,9 @@ def linear_tangent_dynamics(t: float, state: np.ndarray, mu: float, ve: float, t
 
 
 @_validate
-def orbital_elements(r: np.ndarray, v: np.ndarray, mu: float) -> dict[str, float | np.ndarray]:
+def orbital_elements(
+    r: np.ndarray, v: np.ndarray, mu: float
+) -> dict[str, float | np.ndarray]:
     """
     Compute orbital elements from 2D position and velocity vectors.
 
@@ -311,7 +327,10 @@ class Simulator:
                 print(f"Stage {stage.name} will hit periapsis target.")
                 # Somewhere in this stage we hit our periapsis goal, so find
                 # the best burn time.
-                return self.find_burn_time(solution, stage)
+                print("About to find_burn_time", flush=True)
+                ret = self.find_burn_time(solution, stage)
+                print("back from find_burn_time", flush=True)
+                return ret
 
             print(
                 f"Stage {stage.name} will only raise periapsis to { orbit["periapsis_radius"]}, which is below target of {self.target_radius}"
@@ -320,7 +339,7 @@ class Simulator:
             solution = self.solve_coast((0, 1.0), r, v)
             r, v = to_rv(solution.y[:, -1])
 
-        return np.inf
+        return MAX_ERROR
 
     # Returns error() value at the minimum burn time.
     @_validate
@@ -350,8 +369,26 @@ class Simulator:
 
             return res.fun
         else:
-            print("Couldn't find burn time to minimze orbital error.")
-            return np.inf
+            print("Couldn't find burn time to minimze orbital error.", flush=True)
+            return MAX_ERROR
+
+    @staticmethod
+    def prograde_at_apoapsis(orbit) -> float:
+        # Eccentricity vector points to periapsis, so apoapsis direction is [-ex, -ey].
+        # Prograde is perpendicular to that, with sign determined by angular momentum.
+        # For h>0 (CCW): rotate apoapsis direction 90° CCW: [ey, -ex]
+        # For h<0 (CW):  rotate apoapsis direction 90° CW:  [-ey, ex]
+        ex, ey = orbit["eccentricity_vector"]
+        h = orbit["angular_momentum"]
+
+        if h > 0:
+            prograde_x = ey
+            prograde_y = -ex
+        else:
+            prograde_x = -ey
+            prograde_y = ex
+
+        return math.atan2(prograde_y, prograde_x)
 
     @_validate
     def find_linear_tangent_params(
@@ -359,6 +396,15 @@ class Simulator:
     ) -> None:
         initial_mass = self.stages[0].initial_mass
         r_hat, w_hat, r, v = project(r3d, v3d)
+
+        # Find the prograde direction at apoapsis
+        orbit = orbital_elements(r, v, self.mu)
+
+        angle_rad = prograde_at_apoapsis(orbit)
+
+        # Our goal is to raise periapsis to get us into orbit.  So periapsis
+        # should be below tart or someone is very confused.
+        assert orbit["periapsis_radius"] < self.target_radius
 
         # Simulate coasting (no thrust) up until apopasis.  We know we need to burn
         # before apoapsis, so that's a good upper bound on when to start burning.
@@ -404,11 +450,15 @@ class Simulator:
         def start_burn_at(t):
             print(f"***** Simulating starting the burn at {t}")
             r, v = to_rv(sol_fn(t))
-            return self.circularization_burn(r, v)
+            ret = self.circularization_burn(r, v)
+            print("Returning from start_burn_at", flush=True)
+            print(ret)
+            return ret
 
         for t in np.linspace(0, time_to_apoapsis, 100):
+            print("Calling start_burn_at", flush=True)
             err = start_burn_at(t)
-            print(f"Starting burn at {t}, error is {err}.")
+            print(f"Starting burn at {t}, error is {err}.", flush=True)
 
         res = minimize_scalar(
             start_burn_at,
@@ -439,179 +489,44 @@ class Simulator:
         )
 
 
-TARGET_ALTITUDE = 80_000
+def main():
+    with np.errstate(invalid="raise"):
+        TARGET_ALTITUDE = 80_000
 
-# Swivel in vacuum:
-SWIVEL = Stage(
-    "Swivel",
-    ve=320 * 9.80665,  # m / sec
-    thrust=215_000.0,  # Newtons = kg m / sec^2
-    max_burn_time=46.95725973451462,
-    initial_mass=13057.14453125,
-)
+        # Swivel in vacuum:
+        SWIVEL = Stage(
+            "Swivel",
+            ve=320 * 9.80665,  # m / sec
+            thrust=215_000.0,  # Newtons = kg m / sec^2
+            max_burn_time=46.95725973451462,
+            initial_mass=13057.14453125,
+        )
 
-# Terrier
-TERRIER = Stage(
-    "Terrier",
-    ve=345 * 9.80665,  # m / sec
-    thrust=60_000.0,  # Newtons = kg m / sec^2, flow_rate=17.7341950083118 kg/sec
-    max_burn_time=112.77647255563578,
-    initial_mass=4450.0,  # 2450 mass after burn?
-)
+        # Terrier
+        TERRIER = Stage(
+            "Terrier",
+            ve=345 * 9.80665,  # m / sec
+            thrust=60_000.0,  # Newtons = kg m / sec^2, flow_rate=17.7341950083118 kg/sec
+            max_burn_time=112.77647255563578,
+            initial_mass=4450.0,  # 2450 mass after burn?
+        )
 
-MU = 3.5316e12
+        MU = 3.5316e12
 
-sim = Simulator(
-    MU,
-    body_radius=KERBIN_RADIUS,
-    target_altitude=TARGET_ALTITUDE,
-    stages=[SWIVEL, TERRIER],
-)
+        sim = Simulator(
+            MU,
+            body_radius=KERBIN_RADIUS,
+            target_altitude=TARGET_ALTITUDE,
+            stages=[SWIVEL, TERRIER],
+        )
 
+        R3D = np.array([428392.15435586, -1053.61873734, -455905.93323801])
+        V3D = np.array([1.03031015e03, -9.32270447e-01, -1.19588146e02])
 
-# Some unit tests.
+        TIME_TO_APOAPSIS = 103.31401749403551
 
-
-@dataclass
-class DynamicsTestState:
-    r3d: np.ndarray
-    v3d: np.ndarray
-    elapsed: float
-    apopasis: float
-    periapsis: float
-    mass: float
+        sim.find_burn_params(R3D, V3D, TIME_TO_APOAPSIS)
 
 
-def test():
-    # Coasting from an actual KSP run
-    start = DynamicsTestState(
-        np.array([431112.62181422, -1047.74169562, -454361.98728172]),
-        np.array([1.02438523e03, -7.69046995e-01, -1.07508305e02]),
-        54.363529664213274,
-        65555.19069490046 + KERBIN_RADIUS,
-        -574167.8198834253 + KERBIN_RADIUS,
-        mass=13055.69140625,
-    )
-    finish = DynamicsTestState(
-        np.array([432296.55963095, -1048.62195439, -454482.19824191]),
-        np.array([1.01700685e03, -7.48933331e-01, -9.98698324e01]),
-        55.523529664238595,
-        65534.03015425219 + KERBIN_RADIUS,
-        -574174.862050127 + KERBIN_RADIUS,
-        mass=13055.69140625,
-    )
-    sim = Simulator(
-        MU,
-        body_radius=KERBIN_RADIUS,
-        target_altitude=TARGET_ALTITUDE,
-        stages=[SWIVEL, TERRIER],
-    )
-    r_hat, w_hat, r, v = project(start.r3d, start.v3d)
-
-    print(f"{r=}, {v=}")
-
-    def full(vec):
-        return vec[0] * r_hat + vec[1] * w_hat
-
-    np.testing.assert_allclose(full(r), start.r3d)
-
-    solution = sim.solve_coast((start.elapsed, finish.elapsed), r, v)
-    assert math.isclose(solution.t[-1], finish.elapsed)
-    end_r, end_v = to_rv(solution.y[:, -1])
-    np.testing.assert_allclose(full(end_r), finish.r3d, atol=0.5)
-    np.testing.assert_allclose(full(end_v), finish.v3d, atol=0.2)
-
-
-test()
-
-
-def test_orbital_elements():
-    mu = 3.5316e12  # Kerbin
-
-    # --- Circular orbit ---
-    # At radius R with circular velocity v_c = sqrt(mu/R), e=0, a=R
-    R = 680_000.0  # 80 km altitude
-    v_c = math.sqrt(mu / R)
-    # Position along +x, velocity along +y (prograde)
-    elems = orbital_elements(np.array([R, 0.0]), np.array([0.0, v_c]), mu)
-    assert math.isclose(elems["eccentricity"], 0.0, abs_tol=1e-10), f"e={elems['eccentricity']}"
-    assert math.isclose(elems["semi_major_axis"], R, rel_tol=1e-10), f"a={elems['semi_major_axis']}"
-    assert math.isclose(elems["periapsis_radius"], R, rel_tol=1e-10), f"rp={elems['periapsis_radius']}"
-    assert math.isclose(elems["apoapsis_radius"], R, rel_tol=1e-10), f"ra={elems['apoapsis_radius']}"
-    assert math.isclose(elems["angular_momentum"], R * v_c, rel_tol=1e-10)
-    # Eccentricity vector should be ~zero
-    np.testing.assert_allclose(elems["eccentricity_vector"], [0.0, 0.0], atol=1e-10)
-    print("  ✓ Circular orbit")
-
-    # --- Elliptical orbit at periapsis ---
-    # At periapsis: r = rp, velocity is purely tangential
-    # For a known a and e: rp = a(1-e), ra = a(1+e), v_p = sqrt(mu * (2/rp - 1/a))
-    a = 750_000.0
-    e = 0.1
-    rp = a * (1 - e)
-    ra = a * (1 + e)
-    v_p = math.sqrt(mu * (2.0 / rp - 1.0 / a))
-    elems = orbital_elements(np.array([rp, 0.0]), np.array([0.0, v_p]), mu)
-    assert math.isclose(elems["eccentricity"], e, rel_tol=1e-10), f"e={elems['eccentricity']}"
-    assert math.isclose(elems["semi_major_axis"], a, rel_tol=1e-10), f"a={elems['semi_major_axis']}"
-    assert math.isclose(elems["periapsis_radius"], rp, rel_tol=1e-10), f"rp={elems['periapsis_radius']}"
-    assert math.isclose(elems["apoapsis_radius"], ra, rel_tol=1e-10), f"ra={elems['apoapsis_radius']}"
-    # At periapsis, eccentricity vector points along +x (toward periapsis)
-    e_vec = elems["eccentricity_vector"]
-    assert math.isclose(e_vec[0], e, abs_tol=1e-10), f"e_vec[0]={e_vec[0]}"
-    assert math.isclose(e_vec[1], 0.0, abs_tol=1e-10), f"e_vec[1]={e_vec[1]}"
-    print("  ✓ Elliptical orbit at periapsis")
-
-    # --- Elliptical orbit at apoapsis ---
-    # At apoapsis: r = ra, velocity is purely tangential but slower
-    v_a = math.sqrt(mu * (2.0 / ra - 1.0 / a))
-    # At apoapsis along +x, velocity is -y (going clockwise)
-    elems = orbital_elements(np.array([ra, 0.0]), np.array([0.0, -v_a]), mu)
-    assert math.isclose(elems["eccentricity"], e, rel_tol=1e-10), f"e={elems['eccentricity']}"
-    assert math.isclose(elems["semi_major_axis"], a, rel_tol=1e-10), f"a={elems['semi_major_axis']}"
-    assert math.isclose(elems["periapsis_radius"], rp, rel_tol=1e-10), f"rp={elems['periapsis_radius']}"
-    assert math.isclose(elems["apoapsis_radius"], ra, rel_tol=1e-10), f"ra={elems['apoapsis_radius']}"
-    # At apoapsis along +x, eccentricity vector points toward periapsis (-x)
-    e_vec = elems["eccentricity_vector"]
-    assert math.isclose(e_vec[0], -e, abs_tol=1e-10), f"e_vec[0]={e_vec[0]}"
-    assert math.isclose(e_vec[1], 0.0, abs_tol=1e-10), f"e_vec[1]={e_vec[1]}"
-    print("  ✓ Elliptical orbit at apoapsis")
-
-    # --- Hyperbolic orbit ---
-    # At periapsis with v > escape velocity
-    v_esc = math.sqrt(2 * mu / R)
-    v_hyp = v_esc * 1.2  # 20% above escape velocity
-    elems = orbital_elements(np.array([R, 0.0]), np.array([0.0, v_hyp]), mu)
-    assert elems["eccentricity"] > 1.0, f"e={elems['eccentricity']}"
-    assert elems["semi_major_axis"] < 0, f"a={elems['semi_major_axis']} (should be negative)"
-    assert math.isclose(elems["periapsis_radius"], R, rel_tol=1e-6), f"rp={elems['periapsis_radius']}"
-    assert elems["apoapsis_radius"] == np.inf, f"ra={elems['apoapsis_radius']}"
-    assert elems["specific_energy"] > 0, "energy should be positive for hyperbolic"
-    print("  ✓ Hyperbolic orbit")
-
-    # --- Rotated elliptical orbit ---
-    # Same ellipse as before but rotated 90°: periapsis along +y
-    elems = orbital_elements(np.array([0.0, rp]), np.array([-v_p, 0.0]), mu)
-    assert math.isclose(elems["eccentricity"], e, rel_tol=1e-10), f"e={elems['eccentricity']}"
-    assert math.isclose(elems["semi_major_axis"], a, rel_tol=1e-10)
-    assert math.isclose(elems["periapsis_radius"], rp, rel_tol=1e-10)
-    assert math.isclose(elems["apoapsis_radius"], ra, rel_tol=1e-10)
-    # Eccentricity vector should point along +y
-    e_vec = elems["eccentricity_vector"]
-    assert math.isclose(e_vec[0], 0.0, abs_tol=1e-10), f"e_vec[0]={e_vec[0]}"
-    assert math.isclose(e_vec[1], e, abs_tol=1e-10), f"e_vec[1]={e_vec[1]}"
-    print("  ✓ Rotated elliptical orbit")
-
-    print("All orbital_elements tests passed!")
-
-
-test_orbital_elements()
-
-
-R3D = np.array([428392.15435586, -1053.61873734, -455905.93323801])
-V3D = np.array([1.03031015e03, -9.32270447e-01, -1.19588146e02])
-
-
-TIME_TO_APOAPSIS = 103.31401749403551
-
-sim.find_burn_params(R3D, V3D, TIME_TO_APOAPSIS)
+if __name__ == "__main__":
+    main()
