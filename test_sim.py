@@ -6,8 +6,6 @@ from dataclasses import dataclass
 import numpy as np
 import pytest
 
-# pytestmark = pytest.mark.filterwarnings("error")
-
 pytestmark = pytest.mark.filterwarnings("error::RuntimeWarning")
 
 from sim import (
@@ -41,6 +39,10 @@ TERRIER = Stage(
 )
 
 
+def vector(*coords: float) -> np.ndarray:
+    return np.asarray(coords, dtype=float)
+
+
 @pytest.fixture
 def sim():
     return Simulator(
@@ -66,16 +68,16 @@ class DynamicsTestState:
 
 # Coasting states from an actual KSP run
 COAST_START = DynamicsTestState(
-    np.array([431112.62181422, -1047.74169562, -454361.98728172]),
-    np.array([1.02438523e03, -7.69046995e-01, -1.07508305e02]),
+    vector(431112.62181422, -1047.74169562, -454361.98728172),
+    vector(1.02438523e03, -7.69046995e-01, -1.07508305e02),
     54.363529664213274,
     65555.19069490046 + KERBIN_RADIUS,
     -574167.8198834253 + KERBIN_RADIUS,
     mass=13055.69140625,
 )
 COAST_FINISH = DynamicsTestState(
-    np.array([432296.55963095, -1048.62195439, -454482.19824191]),
-    np.array([1.01700685e03, -7.48933331e-01, -9.98698324e01]),
+    vector(432296.55963095, -1048.62195439, -454482.19824191),
+    vector(1.01700685e03, -7.48933331e-01, -9.98698324e01),
     55.523529664238595,
     65534.03015425219 + KERBIN_RADIUS,
     -574174.862050127 + KERBIN_RADIUS,
@@ -107,7 +109,7 @@ def test_circular_orbit():
     """Circular orbit: e=0, a=R, rp=ra=R, zero eccentricity vector."""
     R = 680_000.0
     v_c = math.sqrt(MU / R)
-    elems = orbital_elements(np.array([R, 0.0]), np.array([0.0, v_c]), MU)
+    elems = orbital_elements(vector(R, 0.0), vector(0.0, v_c), MU)
 
     assert elems["eccentricity"] == pytest.approx(0.0, abs=1e-10)
     assert elems["semi_major_axis"] == pytest.approx(R, rel=1e-10)
@@ -125,7 +127,7 @@ def test_elliptical_orbit_at_periapsis():
     ra = a * (1 + e)
     v_p = math.sqrt(MU * (2.0 / rp - 1.0 / a))
 
-    elems = orbital_elements(np.array([rp, 0.0]), np.array([0.0, v_p]), MU)
+    elems = orbital_elements(vector(rp, 0.0), vector(0.0, v_p), MU)
 
     assert elems["eccentricity"] == pytest.approx(e, rel=1e-10)
     assert elems["semi_major_axis"] == pytest.approx(a, rel=1e-10)
@@ -145,7 +147,7 @@ def test_elliptical_orbit_at_apoapsis():
     v_a = math.sqrt(MU * (2.0 / ra - 1.0 / a))
 
     # At apoapsis along +x, velocity is -y (clockwise orbit)
-    elems = orbital_elements(np.array([ra, 0.0]), np.array([0.0, -v_a]), MU)
+    elems = orbital_elements(vector(ra, 0.0), vector(0.0, -v_a), MU)
 
     assert elems["eccentricity"] == pytest.approx(e, rel=1e-10)
     assert elems["semi_major_axis"] == pytest.approx(a, rel=1e-10)
@@ -162,7 +164,7 @@ def test_hyperbolic_orbit():
     v_esc = math.sqrt(2 * MU / R)
     v_hyp = v_esc * 1.2
 
-    elems = orbital_elements(np.array([R, 0.0]), np.array([0.0, v_hyp]), MU)
+    elems = orbital_elements(vector(R, 0.0), vector(0.0, v_hyp), MU)
 
     assert elems["eccentricity"] > 1.0
     assert elems["semi_major_axis"] < 0
@@ -179,7 +181,7 @@ def test_rotated_elliptical_orbit():
     ra = a * (1 + e)
     v_p = math.sqrt(MU * (2.0 / rp - 1.0 / a))
 
-    elems = orbital_elements(np.array([0.0, rp]), np.array([-v_p, 0.0]), MU)
+    elems = orbital_elements(vector(0.0, rp), vector(-v_p, 0.0), MU)
 
     assert elems["eccentricity"] == pytest.approx(e, rel=1e-10)
     assert elems["semi_major_axis"] == pytest.approx(a, rel=1e-10)
@@ -204,7 +206,7 @@ def test_prograde_at_apoapsis_ccw_periapsis_along_x():
     v_p = math.sqrt(MU * (2.0 / rp - 1.0 / a))
 
     # At periapsis along +x, CCW velocity is +y
-    elems = orbital_elements(np.array([rp, 0.0]), np.array([0.0, v_p]), MU)
+    elems = orbital_elements(vector(rp, 0.0), vector(0.0, v_p), MU)
     assert elems["angular_momentum"] > 0  # confirm CCW
 
     angle = Simulator.prograde_at_apoapsis(elems)
@@ -222,7 +224,7 @@ def test_prograde_at_apoapsis_cw_periapsis_along_x():
     v_p = math.sqrt(MU * (2.0 / rp - 1.0 / a))
 
     # At periapsis along +x, CW velocity is -y
-    elems = orbital_elements(np.array([rp, 0.0]), np.array([0.0, -v_p]), MU)
+    elems = orbital_elements(vector(rp, 0.0), vector(0.0, -v_p), MU)
     assert elems["angular_momentum"] < 0  # confirm CW
 
     angle = Simulator.prograde_at_apoapsis(elems)
@@ -240,7 +242,7 @@ def test_prograde_at_apoapsis_ccw_periapsis_along_y():
     v_p = math.sqrt(MU * (2.0 / rp - 1.0 / a))
 
     # At periapsis along +y, CCW velocity is -x
-    elems = orbital_elements(np.array([0.0, rp]), np.array([-v_p, 0.0]), MU)
+    elems = orbital_elements(vector(0.0, rp), vector(-v_p, 0.0), MU)
     assert elems["angular_momentum"] > 0  # confirm CCW
 
     angle = Simulator.prograde_at_apoapsis(elems)
@@ -259,8 +261,8 @@ def test_prograde_at_apoapsis_matches_actual_velocity(sim):
     v_p = math.sqrt(MU * (2.0 / rp - 1.0 / a))
 
     # Start at periapsis (CCW)
-    r0 = np.array([rp, 0.0])
-    v0 = np.array([0.0, v_p])
+    r0 = vector(rp, 0.0)
+    v0 = vector(0.0, v_p)
 
     # Compute half-period: T/2 = π * sqrt(a³/mu)
     half_period = math.pi * math.sqrt(a**3 / MU)
@@ -271,7 +273,7 @@ def test_prograde_at_apoapsis_matches_actual_velocity(sim):
 
     # At apoapsis the radius should be ~ra (within 100m — integrator stops at T/2,
     # not the exact apoapsis moment)
-    assert np.linalg.norm(r_apo) == pytest.approx(ra, abs=100.0)
+    assert np.linalg.norm(r_apo) == pytest.approx(ra, abs=10.0)
 
     # The actual prograde angle from propagation
     actual_angle = math.atan2(v_apo[1], v_apo[0])
