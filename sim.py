@@ -4,8 +4,14 @@ import math
 from abc import ABC, abstractmethod
 from collections.abc import Callable
 from dataclasses import dataclass
-from typing import cast
+
+
 import numpy as np
+from numpy.typing import NDArray
+from typing import cast
+
+# Type alias for float64 arrays
+Vector = NDArray[np.float64]
 from pydantic import ConfigDict, validate_call
 from scipy.integrate import solve_ivp
 from scipy.integrate._ivp.ivp import OdeResult
@@ -29,12 +35,25 @@ class Stage:
 
 
 @dataclass
+class OrbitalElements:
+    """Orbital elements computed from position and velocity vectors."""
+
+    semi_major_axis: float
+    eccentricity: float
+    eccentricity_vector: Vector
+    angular_momentum: float
+    specific_energy: float
+    periapsis_radius: float
+    apoapsis_radius: float
+
+
+@dataclass
 class BurnResult:
     """Final state after propagating a linear-tangent burn, plus its error
     against the target orbit (see Simulator.error)."""
 
-    r: np.ndarray
-    v: np.ndarray
+    r: Vector
+    v: Vector
     mass: float
     error: float
 
@@ -46,14 +65,14 @@ class BurnResult:
 """
 
 
-def cross2d(r: np.ndarray, v: np.ndarray) -> float:
+def cross2d(r: Vector, v: Vector) -> float:
     return float(r[0] * v[1] - r[1] * v[0])
 
 
 @_validate
 def project(
-    r: np.ndarray, v: np.ndarray
-) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    r: Vector, v: Vector
+) -> tuple[Vector, Vector, Vector, Vector]:
     # r = 0 means at the center of the body; since we're above the surface,
     # r should never be close to zero, so we can divide with confidence.
     r_norm = np.linalg.norm(r)
@@ -79,14 +98,14 @@ def project(
     return (r_hat, w_hat, r_projected, v_projected)
 
 
-def to_rv(state: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+def to_rv(state: Vector) -> tuple[Vector, Vector]:
     x, y, vx, vy = state
-    return (np.array([x, y]), np.array([vx, vy]))
+    return (np.array([x, y], dtype=np.float64), np.array([vx, vy], dtype=np.float64))
 
 
-def to_rvm(state: np.ndarray) -> tuple[np.ndarray, np.ndarray, float]:
+def to_rvm(state: Vector) -> tuple[Vector, Vector, float]:
     x, y, vx, vy, mass = state
-    return (np.array([x, y]), np.array([vx, vy]), mass)
+    return (np.array([x, y], dtype=np.float64), np.array([vx, vy], dtype=np.float64), float(mass))
 
 
 def coast_dynamics(t: float, state: np.ndarray, mu: float) -> list[float]:
@@ -176,8 +195,8 @@ def linear_tangent_dynamics(
 
 @_validate
 def orbital_elements(
-    r: np.ndarray, v: np.ndarray, mu: float
-) -> dict[str, float | np.ndarray]:
+    r: Vector, v: Vector, mu: float
+) -> OrbitalElements:
     """
     Compute orbital elements from 2D position and velocity vectors.
 
@@ -231,17 +250,17 @@ def orbital_elements(
     else:
         p = h**2 / mu
         rp = p / (1 + e)
-        ra = np.inf
+        ra = np.float64(np.inf)
 
-    return {
-        "semi_major_axis": a,
-        "eccentricity": e,
-        "eccentricity_vector": e_vec,
-        "angular_momentum": h,
-        "specific_energy": energy,
-        "periapsis_radius": rp,
-        "apoapsis_radius": ra,
-    }
+    return OrbitalElements(
+        semi_major_axis=a,
+        eccentricity=e,
+        eccentricity_vector=e_vec,
+        angular_momentum=h,
+        specific_energy=energy,
+        periapsis_radius=rp,
+        apoapsis_radius=ra,
+    )
 
 
 class Regime(ABC):
@@ -266,8 +285,8 @@ class Regime(ABC):
 
     @abstractmethod
     def evaluate(
-        self, sim: "Simulator", coast_fn: Callable[[float], np.ndarray], ref_angle: float, x: np.ndarray
-    ) -> tuple[float, np.ndarray, np.ndarray, float]:
+        self, sim: "Simulator", coast_fn: Callable[[float], Vector], ref_angle: float, x: np.ndarray
+    ) -> tuple[float, Vector, Vector, float]:
         """Map an optimizer vector x to (error, r, v, burn_time)."""
 
 
@@ -288,8 +307,8 @@ class Regime3D(Regime):
         return [(0.0, coast_bound), (-5.0, 5.0), (-1.0, 1.0)]
 
     def evaluate(
-        self, sim: "Simulator", coast_fn: Callable[[float], np.ndarray], ref_angle: float, x: np.ndarray
-    ) -> tuple[float, np.ndarray, np.ndarray, float]:
+        self, sim: "Simulator", coast_fn: Callable[[float], Vector], ref_angle: float, x: np.ndarray
+    ) -> tuple[float, Vector, Vector, float]:
         coast_time, a_coeff, b_coeff = x
         r, v = to_rv(coast_fn(coast_time))
         budget = sim.total_burn_budget()
@@ -327,8 +346,8 @@ class Regime4D(Regime):
         ]
 
     def evaluate(
-        self, sim: "Simulator", coast_fn: Callable[[float], np.ndarray], ref_angle: float, x: np.ndarray
-    ) -> tuple[float, np.ndarray, np.ndarray, float]:
+        self, sim: "Simulator", coast_fn: Callable[[float], Vector], ref_angle: float, x: np.ndarray
+    ) -> tuple[float, Vector, Vector, float]:
         coast_time, a_coeff, b_coeff, burn_time = x
         r, v = to_rv(coast_fn(coast_time))
         result = sim.propagate_linear_tangent(
@@ -360,7 +379,7 @@ class Simulator:
 
     @_validate
     def solve_coast(
-        self, t_span: tuple[float, float], r: np.ndarray, v: np.ndarray
+        self, t_span: tuple[float, float], r: Vector, v: Vector
     ) -> OdeResult:
         return solve_ivp(
             coast_dynamics,
@@ -375,8 +394,8 @@ class Simulator:
     @_validate
     def solve_linear_tangent(
         self,
-        r: np.ndarray,
-        v: np.ndarray,
+        r: Vector,
+        v: Vector,
         stage: Stage,
         a_coeff: float,
         b_coeff: float,
@@ -393,7 +412,7 @@ class Simulator:
         )
 
     @_validate
-    def solve_prograde(self, r: np.ndarray, v: np.ndarray, stage: Stage) -> OdeResult:
+    def solve_prograde(self, r: Vector, v: Vector, stage: Stage) -> OdeResult:
         return solve_ivp(
             prograde_dynamics,
             (0, stage.max_burn_time),
@@ -412,8 +431,8 @@ class Simulator:
     @_validate
     def propagate_linear_tangent(
         self,
-        r: np.ndarray,
-        v: np.ndarray,
+        r: Vector,
+        v: Vector,
         a_coeff: float,
         b_coeff: float,
         ref_angle: float,
@@ -434,27 +453,27 @@ class Simulator:
             assert solution.sol is not None
 
             if remaining <= stage.max_burn_time:
-                state = solution.sol(remaining)
+                state = cast(Vector, solution.sol(remaining))
                 r, v, mass = to_rvm(state)
                 return BurnResult(r, v, mass, self.error(state))
 
             remaining -= stage.max_burn_time
-            r, v, mass = to_rvm(solution.y[:, -1])
+            r, v, mass = to_rvm(cast(Vector, solution.y[:, -1]))
             # Simulate staging as a 1 second coast.
             coast = self.solve_coast((0, 1.0), r, v)
-            r, v = to_rv(coast.y[:, -1])
+            r, v = to_rv(cast(Vector, coast.y[:, -1]))
 
         # Ran out of stages before using all of the requested burn time.
         return BurnResult(r, v, mass, MAX_ERROR)
 
     # Returns error?  This is after the coast, starts with the actual burn.
     @_validate
-    def circularization_burn(self, r: np.ndarray, v: np.ndarray) -> float:
+    def circularization_burn(self, r: Vector, v: Vector) -> float:
 
         # If our periapsis is already at or above target, there's nothing to do.
 
         orbit = orbital_elements(r, v, self.mu)
-        assert orbit["periapsis_radius"] < self.target_radius
+        assert orbit.periapsis_radius < self.target_radius
 
         # Iterate over stages to find the one where we'll achieve our periapsis
         # goal.
@@ -471,9 +490,9 @@ class Simulator:
 
             # print(f"{solution.y}")
 
-            r, v, _ = to_rvm(solution.y[:, -1])
+            r, v, _ = to_rvm(cast(Vector, solution.y[:, -1]))
             orbit = orbital_elements(r, v, self.mu)
-            if orbit["periapsis_radius"] >= self.target_radius:
+            if orbit.periapsis_radius >= self.target_radius:
                 print(f"Stage {stage.name} will hit periapsis target.")
                 # Somewhere in this stage we hit our periapsis goal, so find
                 # the best burn time.
@@ -483,11 +502,11 @@ class Simulator:
                 return ret
 
             print(
-                f"Stage {stage.name} will only raise periapsis to { orbit["periapsis_radius"]}, which is below target of {self.target_radius}"
+                f"Stage {stage.name} will only raise periapsis to { orbit.periapsis_radius}, which is below target of {self.target_radius}"
             )
             # Simulate staging as a 1 second coast.
             solution = self.solve_coast((0, 1.0), r, v)
-            r, v = to_rv(solution.y[:, -1])
+            r, v = to_rv(cast(Vector, solution.y[:, -1]))
 
         return MAX_ERROR
 
@@ -513,8 +532,8 @@ class Simulator:
             r, v, _ = to_rvm(sol_fn(res.x))
             elements = orbital_elements(r, v, self.mu)
 
-            ap = elements["apoapsis_radius"]
-            pe = elements["periapsis_radius"]
+            ap = elements.apoapsis_radius
+            pe = elements.periapsis_radius
             print(f"apo: {ap - KERBIN_RADIUS}, per: {pe - KERBIN_RADIUS}")
 
             return res.fun
@@ -523,14 +542,13 @@ class Simulator:
             return MAX_ERROR
 
     @staticmethod
-    def prograde_at_apoapsis(orbit: dict[str, float | np.ndarray]) -> float:
+    def prograde_at_apoapsis(orbit: OrbitalElements) -> float:
         # Eccentricity vector points to periapsis, so apoapsis direction is [-ex, -ey].
         # Prograde is perpendicular to that, with sign determined by angular momentum.
         # For h>0 (CCW): rotate apoapsis direction 90° CCW: [ey, -ex]
         # For h<0 (CW):  rotate apoapsis direction 90° CW:  [-ey, ex]
-        e_vec = cast(np.ndarray, orbit["eccentricity_vector"])
-        ex, ey = e_vec
-        h = cast(float, orbit["angular_momentum"])
+        ex, ey = orbit.eccentricity_vector
+        h = orbit.angular_momentum
 
         if h > 0:
             prograde_x = ey
@@ -544,8 +562,8 @@ class Simulator:
     @_validate
     def find_linear_tangent_params(
         self,
-        r3d: np.ndarray,
-        v3d: np.ndarray,
+        r3d: Vector,
+        v3d: Vector,
         time_to_apoapsis: float,
         regime: Regime,
     ) -> OptimizeResult:
@@ -562,7 +580,7 @@ class Simulator:
 
         # Our goal is to raise periapsis to get us into orbit.  So periapsis
         # should be below target or someone is very confused.
-        assert orbit["periapsis_radius"] < self.target_radius
+        assert orbit.periapsis_radius < self.target_radius
 
         # Simulate coasting (no thrust) up until apoapsis.  We know we need to burn
         # before apoapsis, so that's a good upper bound on when to start burning.
@@ -601,8 +619,8 @@ class Simulator:
         print(f"b coefficient:     {b_coeff:8.6f}")
         print(f"Burn time:         {burn_time:8.2f} s")
         print(f"RMS orbital error: {error:8.2f} m")
-        ap_alt = final_orbit["apoapsis_radius"] - KERBIN_RADIUS
-        pe_alt = final_orbit["periapsis_radius"] - KERBIN_RADIUS
+        ap_alt = final_orbit.apoapsis_radius - KERBIN_RADIUS
+        pe_alt = final_orbit.periapsis_radius - KERBIN_RADIUS
         print(f"Apoapsis:          {ap_alt:8.2f} m")
         print(f"Periapsis:         {pe_alt:8.2f} m")
         print()
@@ -611,7 +629,7 @@ class Simulator:
     # INITIAL ENTRY POINT.
     @_validate
     def find_burn_params(
-        self, r3d: np.ndarray, v3d: np.ndarray, time_to_apoapsis: float
+        self, r3d: Vector, v3d: Vector, time_to_apoapsis: float
     ) -> None:
         initial_mass = self.stages[0].initial_mass
         r_hat, w_hat, r, v = project(r3d, v3d)
@@ -661,12 +679,12 @@ class Simulator:
         print(f"altitude: {np.linalg.norm(r) - KERBIN_RADIUS}")
 
     @_validate
-    def error(self, state: np.ndarray) -> float:
+    def error(self, state: Vector) -> float:
         r, v, _ = to_rvm(state)
         elements = orbital_elements(r, v, self.mu)
 
-        ap = elements["apoapsis_radius"]
-        pe = elements["periapsis_radius"]
+        ap = elements.apoapsis_radius
+        pe = elements.periapsis_radius
 
         return math.sqrt(
             ((ap - self.target_radius) ** 2 + (pe - self.target_radius) ** 2) / 2

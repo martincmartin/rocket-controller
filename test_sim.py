@@ -111,12 +111,12 @@ def test_circular_orbit():
     v_c = math.sqrt(MU / R)
     elems = orbital_elements(vector(R, 0.0), vector(0.0, v_c), MU)
 
-    assert elems["eccentricity"] == pytest.approx(0.0, abs=1e-10)
-    assert elems["semi_major_axis"] == pytest.approx(R, rel=1e-10)
-    assert elems["periapsis_radius"] == pytest.approx(R, rel=1e-10)
-    assert elems["apoapsis_radius"] == pytest.approx(R, rel=1e-10)
-    assert elems["angular_momentum"] == pytest.approx(R * v_c, rel=1e-10)
-    np.testing.assert_allclose(elems["eccentricity_vector"], [0.0, 0.0], atol=1e-10)
+    assert elems.eccentricity == pytest.approx(0.0, abs=1e-10)
+    assert elems.semi_major_axis == pytest.approx(R, rel=1e-10)
+    assert elems.periapsis_radius == pytest.approx(R, rel=1e-10)
+    assert elems.apoapsis_radius == pytest.approx(R, rel=1e-10)
+    assert elems.angular_momentum == pytest.approx(R * v_c, rel=1e-10)
+    np.testing.assert_allclose(elems.eccentricity_vector, [0.0, 0.0], atol=1e-10)
 
 
 def test_elliptical_orbit_at_periapsis():
@@ -129,11 +129,11 @@ def test_elliptical_orbit_at_periapsis():
 
     elems = orbital_elements(vector(rp, 0.0), vector(0.0, v_p), MU)
 
-    assert elems["eccentricity"] == pytest.approx(e, rel=1e-10)
-    assert elems["semi_major_axis"] == pytest.approx(a, rel=1e-10)
-    assert elems["periapsis_radius"] == pytest.approx(rp, rel=1e-10)
-    assert elems["apoapsis_radius"] == pytest.approx(ra, rel=1e-10)
-    e_vec = elems["eccentricity_vector"]
+    assert elems.eccentricity == pytest.approx(e, rel=1e-10)
+    assert elems.semi_major_axis == pytest.approx(a, rel=1e-10)
+    assert elems.periapsis_radius == pytest.approx(rp, rel=1e-10)
+    assert elems.apoapsis_radius == pytest.approx(ra, rel=1e-10)
+    e_vec = elems.eccentricity_vector
     assert e_vec[0] == pytest.approx(e, abs=1e-10)
     assert e_vec[1] == pytest.approx(0.0, abs=1e-10)
 
@@ -149,11 +149,11 @@ def test_elliptical_orbit_at_apoapsis():
     # At apoapsis along +x, velocity is -y (clockwise orbit)
     elems = orbital_elements(vector(ra, 0.0), vector(0.0, -v_a), MU)
 
-    assert elems["eccentricity"] == pytest.approx(e, rel=1e-10)
-    assert elems["semi_major_axis"] == pytest.approx(a, rel=1e-10)
-    assert elems["periapsis_radius"] == pytest.approx(rp, rel=1e-10)
-    assert elems["apoapsis_radius"] == pytest.approx(ra, rel=1e-10)
-    e_vec = elems["eccentricity_vector"]
+    assert elems.eccentricity == pytest.approx(e, rel=1e-10)
+    assert elems.semi_major_axis == pytest.approx(a, rel=1e-10)
+    assert elems.periapsis_radius == pytest.approx(rp, rel=1e-10)
+    assert elems.apoapsis_radius == pytest.approx(ra, rel=1e-10)
+    e_vec = elems.eccentricity_vector
     assert e_vec[0] == pytest.approx(-e, abs=1e-10)
     assert e_vec[1] == pytest.approx(0.0, abs=1e-10)
 
@@ -166,11 +166,11 @@ def test_hyperbolic_orbit():
 
     elems = orbital_elements(vector(R, 0.0), vector(0.0, v_hyp), MU)
 
-    assert elems["eccentricity"] > 1.0
-    assert elems["semi_major_axis"] < 0
-    assert elems["periapsis_radius"] == pytest.approx(R, rel=1e-6)
-    assert elems["apoapsis_radius"] == np.inf
-    assert elems["specific_energy"] > 0
+    assert elems.eccentricity > 1.0
+    assert elems.semi_major_axis < 0
+    assert elems.periapsis_radius == pytest.approx(R, rel=1e-6)
+    assert elems.apoapsis_radius == np.inf
+    assert elems.specific_energy > 0
 
 
 def test_rotated_elliptical_orbit():
@@ -183,11 +183,11 @@ def test_rotated_elliptical_orbit():
 
     elems = orbital_elements(vector(0.0, rp), vector(-v_p, 0.0), MU)
 
-    assert elems["eccentricity"] == pytest.approx(e, rel=1e-10)
-    assert elems["semi_major_axis"] == pytest.approx(a, rel=1e-10)
-    assert elems["periapsis_radius"] == pytest.approx(rp, rel=1e-10)
-    assert elems["apoapsis_radius"] == pytest.approx(ra, rel=1e-10)
-    e_vec = elems["eccentricity_vector"]
+    assert elems.eccentricity == pytest.approx(e, rel=1e-10)
+    assert elems.semi_major_axis == pytest.approx(a, rel=1e-10)
+    assert elems.periapsis_radius == pytest.approx(rp, rel=1e-10)
+    assert elems.apoapsis_radius == pytest.approx(ra, rel=1e-10)
+    e_vec = elems.eccentricity_vector
     assert e_vec[0] == pytest.approx(0.0, abs=1e-10)
     assert e_vec[1] == pytest.approx(e, abs=1e-10)
 
@@ -207,7 +207,7 @@ def test_prograde_at_apoapsis_ccw_periapsis_along_x():
 
     # At periapsis along +x, CCW velocity is +y
     elems = orbital_elements(vector(rp, 0.0), vector(0.0, v_p), MU)
-    assert elems["angular_momentum"] > 0  # confirm CCW
+    assert elems.angular_momentum > 0  # confirm CCW
 
     angle = Simulator.prograde_at_apoapsis(elems)
     assert angle == pytest.approx(-math.pi / 2, abs=1e-10)
@@ -225,7 +225,7 @@ def test_prograde_at_apoapsis_cw_periapsis_along_x():
 
     # At periapsis along +x, CW velocity is -y
     elems = orbital_elements(vector(rp, 0.0), vector(0.0, -v_p), MU)
-    assert elems["angular_momentum"] < 0  # confirm CW
+    assert elems.angular_momentum < 0  # confirm CW
 
     angle = Simulator.prograde_at_apoapsis(elems)
     assert angle == pytest.approx(math.pi / 2, abs=1e-10)
@@ -243,7 +243,7 @@ def test_prograde_at_apoapsis_ccw_periapsis_along_y():
 
     # At periapsis along +y, CCW velocity is -x
     elems = orbital_elements(vector(0.0, rp), vector(-v_p, 0.0), MU)
-    assert elems["angular_momentum"] > 0  # confirm CCW
+    assert elems.angular_momentum > 0  # confirm CCW
 
     angle = Simulator.prograde_at_apoapsis(elems)
     assert math.cos(angle) == pytest.approx(1.0, abs=1e-10)
