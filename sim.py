@@ -78,12 +78,12 @@ def project(
     return (r_hat, w_hat, r_projected, v_projected)
 
 
-def to_rv(state) -> tuple[np.ndarray, np.ndarray]:
+def to_rv(state: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
     x, y, vx, vy = state
     return (np.array([x, y]), np.array([vx, vy]))
 
 
-def to_rvm(state) -> tuple[np.ndarray, np.ndarray, float]:
+def to_rvm(state: np.ndarray) -> tuple[np.ndarray, np.ndarray, float]:
     x, y, vx, vy, mass = state
     return (np.array([x, y]), np.array([vx, vy]), mass)
 
@@ -671,7 +671,7 @@ class Simulator:
         )
 
 
-def main():
+def main() -> None:
     with np.errstate(invalid="raise"):
         TARGET_ALTITUDE = 80_000
 
