@@ -4,6 +4,7 @@ import math
 from abc import ABC, abstractmethod
 from collections.abc import Callable
 from dataclasses import dataclass
+from typing import cast
 import numpy as np
 from pydantic import ConfigDict, validate_call
 from scipy.integrate import solve_ivp
@@ -46,7 +47,7 @@ class BurnResult:
 
 
 def cross2d(r: np.ndarray, v: np.ndarray) -> float:
-    return r[0] * v[1] - r[1] * v[0]
+    return float(r[0] * v[1] - r[1] * v[0])
 
 
 @_validate
@@ -496,7 +497,7 @@ class Simulator:
         assert solution.sol is not None
         sol_fn = solution.sol
 
-        def objective(t):
+        def objective(t: float) -> float:
             # print(f"** Burn for {t} sec")
             return self.error(sol_fn(t))
 
@@ -522,13 +523,14 @@ class Simulator:
             return MAX_ERROR
 
     @staticmethod
-    def prograde_at_apoapsis(orbit) -> float:
+    def prograde_at_apoapsis(orbit: dict[str, float | np.ndarray]) -> float:
         # Eccentricity vector points to periapsis, so apoapsis direction is [-ex, -ey].
         # Prograde is perpendicular to that, with sign determined by angular momentum.
         # For h>0 (CCW): rotate apoapsis direction 90° CCW: [ey, -ex]
         # For h<0 (CW):  rotate apoapsis direction 90° CW:  [-ey, ex]
-        ex, ey = orbit["eccentricity_vector"]
-        h = orbit["angular_momentum"]
+        e_vec = cast(np.ndarray, orbit["eccentricity_vector"])
+        ex, ey = e_vec
+        h = cast(float, orbit["angular_momentum"])
 
         if h > 0:
             prograde_x = ey
@@ -629,7 +631,7 @@ class Simulator:
         #         f't: {t}, apoapsis = {elements["apoapsis_radius"]}, periapsis = {elements["periapsis_radius"]}, mass = {mass}'
         #     )
 
-        def start_burn_at(t):
+        def start_burn_at(t: float) -> float:
             print(f"***** Simulating starting the burn at {t}")
             r, v = to_rv(sol_fn(t))
             ret = self.circularization_burn(r, v)
@@ -659,7 +661,7 @@ class Simulator:
         print(f"altitude: {np.linalg.norm(r) - KERBIN_RADIUS}")
 
     @_validate
-    def error(self, state) -> float:
+    def error(self, state: np.ndarray) -> float:
         r, v, _ = to_rvm(state)
         elements = orbital_elements(r, v, self.mu)
 
