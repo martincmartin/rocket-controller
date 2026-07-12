@@ -453,7 +453,7 @@ class Simulator:
             assert solution.sol is not None
 
             if remaining <= stage.max_burn_time:
-                state = cast(Vector, solution.sol(remaining))
+                state = solution.sol(remaining)
                 r, v, mass = to_rvm(state)
                 return BurnResult(r, v, mass, self.error(state))
 
