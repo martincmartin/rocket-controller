@@ -266,14 +266,8 @@ class Regime(ABC):
     @abstractmethod
     def evaluate(
         self, sim: "Simulator", coast_fn: Callable[[float], np.ndarray], ref_angle: float, x: np.ndarray
-    ) -> float:
-        """Map an optimizer vector x to an orbital error (see Simulator.error)."""
-
-    @abstractmethod
-    def get_final_state(
-        self, sim: "Simulator", coast_fn: Callable[[float], np.ndarray], ref_angle: float, x: np.ndarray
-    ) -> tuple[np.ndarray, np.ndarray, float]:
-        """Return (r, v, burn_time) at the optimal solution x."""
+    ) -> tuple[float, np.ndarray, np.ndarray, float]:
+        """Map an optimizer vector x to (error, r, v, burn_time)."""
 
 
 class Regime3D(Regime):
@@ -294,7 +288,7 @@ class Regime3D(Regime):
 
     def evaluate(
         self, sim: "Simulator", coast_fn: Callable[[float], np.ndarray], ref_angle: float, x: np.ndarray
-    ) -> float:
+    ) -> tuple[float, np.ndarray, np.ndarray, float]:
         coast_time, a_coeff, b_coeff = x
         r, v = to_rv(coast_fn(coast_time))
         budget = sim.total_burn_budget()
@@ -307,29 +301,11 @@ class Regime3D(Regime):
         res = minimize_scalar(
             inner, bounds=(0.0, budget), method="bounded", options={"xatol": 0.01}
         )
-        return res.fun
-
-    def get_final_state(
-        self, sim: "Simulator", coast_fn: Callable[[float], np.ndarray], ref_angle: float, x: np.ndarray
-    ) -> tuple[np.ndarray, np.ndarray, float]:
-        """Return (r, v, burn_time) at the optimal solution."""
-        coast_time, a_coeff, b_coeff = x
-        r, v = to_rv(coast_fn(coast_time))
-        budget = sim.total_burn_budget()
-
-        def inner(burn_time: float) -> float:
-            return sim.propagate_linear_tangent(
-                r, v, a_coeff, b_coeff, ref_angle, burn_time
-            ).error
-
-        res = minimize_scalar(
-            inner, bounds=(0.0, budget), method="bounded", options={"xatol": 0.01}
-        )
-        # Re-fetch the final state at the optimal burn_time
+        # Fetch the final state at the optimal burn_time
         result = sim.propagate_linear_tangent(
             r, v, a_coeff, b_coeff, ref_angle, res.x
         )
-        return (result.r, result.v, res.x)
+        return (res.fun, result.r, result.v, res.x)
 
 
 class Regime4D(Regime):
@@ -351,23 +327,13 @@ class Regime4D(Regime):
 
     def evaluate(
         self, sim: "Simulator", coast_fn: Callable[[float], np.ndarray], ref_angle: float, x: np.ndarray
-    ) -> float:
-        coast_time, a_coeff, b_coeff, burn_time = x
-        r, v = to_rv(coast_fn(coast_time))
-        return sim.propagate_linear_tangent(
-            r, v, a_coeff, b_coeff, ref_angle, burn_time
-        ).error
-
-    def get_final_state(
-        self, sim: "Simulator", coast_fn: Callable[[float], np.ndarray], ref_angle: float, x: np.ndarray
-    ) -> tuple[np.ndarray, np.ndarray, float]:
-        """Return (r, v, burn_time) at the optimal solution."""
+    ) -> tuple[float, np.ndarray, np.ndarray, float]:
         coast_time, a_coeff, b_coeff, burn_time = x
         r, v = to_rv(coast_fn(coast_time))
         result = sim.propagate_linear_tangent(
             r, v, a_coeff, b_coeff, ref_angle, burn_time
         )
-        return (result.r, result.v, burn_time)
+        return (result.error, result.r, result.v, burn_time)
 
 
 class Simulator:
@@ -603,7 +569,8 @@ class Simulator:
         coast_fn = sol.sol
 
         def objective(x: np.ndarray) -> float:
-            return regime.evaluate(self, coast_fn, ref_angle, x)
+            error, _, _, _ = regime.evaluate(self, coast_fn, ref_angle, x)
+            return error
 
         res = minimize(
             objective,
@@ -614,7 +581,7 @@ class Simulator:
         )
 
         # Fetch the final state at the optimal solution
-        r_final, v_final, burn_time = regime.get_final_state(
+        error, r_final, v_final, burn_time = regime.evaluate(
             self, coast_fn, ref_angle, res.x
         )
         final_orbit = orbital_elements(r_final, v_final, self.mu)
@@ -631,7 +598,7 @@ class Simulator:
         print(f"a coefficient:     {a_coeff:8.6f}")
         print(f"b coefficient:     {b_coeff:8.6f}")
         print(f"Burn time:         {burn_time:8.2f} s")
-        print(f"RMS orbital error: {res.fun:8.2f} m")
+        print(f"RMS orbital error: {error:8.2f} m")
         ap_alt = final_orbit["apoapsis_radius"] - KERBIN_RADIUS
         pe_alt = final_orbit["periapsis_radius"] - KERBIN_RADIUS
         print(f"Apoapsis:          {ap_alt:8.2f} m")
