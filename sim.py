@@ -1,12 +1,14 @@
 #!/usr/bin/env python3
 
 import math
+from abc import ABC, abstractmethod
+from collections.abc import Callable
 from dataclasses import dataclass
 import numpy as np
 from pydantic import ConfigDict, validate_call
 from scipy.integrate import solve_ivp
 from scipy.integrate._ivp.ivp import OdeResult
-from scipy.optimize import minimize_scalar
+from scipy.optimize import OptimizeResult, minimize, minimize_scalar
 
 _validate = validate_call(config=ConfigDict(arbitrary_types_allowed=True))
 
@@ -23,6 +25,17 @@ class Stage:
     thrust: float
     max_burn_time: float
     initial_mass: float
+
+
+@dataclass
+class BurnResult:
+    """Final state after propagating a linear-tangent burn, plus its error
+    against the target orbit (see Simulator.error)."""
+
+    r: np.ndarray
+    v: np.ndarray
+    mass: float
+    error: float
 
 
 """
@@ -230,6 +243,133 @@ def orbital_elements(
     }
 
 
+class Regime(ABC):
+    """Picks which linear-tangent parameters the outer optimizer searches
+    over directly, versus which are resolved by a nested search.
+
+    Subclasses let you experiment with different constrained optimization
+    regimes (e.g. 3D vs. 4D) without touching the simulation code: implement
+    `x0`/`bounds`/`evaluate`/`get_final_state` and pass an instance to
+    Simulator.find_linear_tangent_params.
+    """
+
+    name: str
+
+    @abstractmethod
+    def x0(self, sim: "Simulator", coast_bound: float) -> np.ndarray:
+        """Initial guess for the optimizer."""
+
+    @abstractmethod
+    def bounds(self, sim: "Simulator", coast_bound: float) -> list[tuple[float, float]]:
+        """Bounds for each free parameter, in the same order as x0()."""
+
+    @abstractmethod
+    def evaluate(
+        self, sim: "Simulator", coast_fn: Callable[[float], np.ndarray], ref_angle: float, x: np.ndarray
+    ) -> float:
+        """Map an optimizer vector x to an orbital error (see Simulator.error)."""
+
+    @abstractmethod
+    def get_final_state(
+        self, sim: "Simulator", coast_fn: Callable[[float], np.ndarray], ref_angle: float, x: np.ndarray
+    ) -> tuple[np.ndarray, np.ndarray, float]:
+        """Return (r, v, burn_time) at the optimal solution x."""
+
+
+class Regime3D(Regime):
+    """Free params: (coast_time, a_coeff, b_coeff).
+
+    burn_time isn't searched directly; instead, for each (coast_time, a, b)
+    candidate we run a nested 1D search over burn_time to find the cutoff
+    that minimizes orbital error, and report that as the objective value.
+    """
+
+    name = "3D (coast_time, a, b; burn_time solved by nested search)"
+
+    def x0(self, sim: "Simulator", coast_bound: float) -> np.ndarray:
+        return np.array([coast_bound / 2, 0.0, 0.0])
+
+    def bounds(self, sim: "Simulator", coast_bound: float) -> list[tuple[float, float]]:
+        return [(0.0, coast_bound), (-5.0, 5.0), (-1.0, 1.0)]
+
+    def evaluate(
+        self, sim: "Simulator", coast_fn: Callable[[float], np.ndarray], ref_angle: float, x: np.ndarray
+    ) -> float:
+        coast_time, a_coeff, b_coeff = x
+        r, v = to_rv(coast_fn(coast_time))
+        budget = sim.total_burn_budget()
+
+        def inner(burn_time: float) -> float:
+            return sim.propagate_linear_tangent(
+                r, v, a_coeff, b_coeff, ref_angle, burn_time
+            ).error
+
+        res = minimize_scalar(
+            inner, bounds=(0.0, budget), method="bounded", options={"xatol": 0.01}
+        )
+        return res.fun
+
+    def get_final_state(
+        self, sim: "Simulator", coast_fn: Callable[[float], np.ndarray], ref_angle: float, x: np.ndarray
+    ) -> tuple[np.ndarray, np.ndarray, float]:
+        """Return (r, v, burn_time) at the optimal solution."""
+        coast_time, a_coeff, b_coeff = x
+        r, v = to_rv(coast_fn(coast_time))
+        budget = sim.total_burn_budget()
+
+        def inner(burn_time: float) -> float:
+            return sim.propagate_linear_tangent(
+                r, v, a_coeff, b_coeff, ref_angle, burn_time
+            ).error
+
+        res = minimize_scalar(
+            inner, bounds=(0.0, budget), method="bounded", options={"xatol": 0.01}
+        )
+        # Re-fetch the final state at the optimal burn_time
+        result = sim.propagate_linear_tangent(
+            r, v, a_coeff, b_coeff, ref_angle, res.x
+        )
+        return (result.r, result.v, res.x)
+
+
+class Regime4D(Regime):
+    """Free params: (coast_time, a_coeff, b_coeff, burn_time), all searched
+    simultaneously by the outer optimizer."""
+
+    name = "4D (coast_time, a, b, burn_time all searched jointly)"
+
+    def x0(self, sim: "Simulator", coast_bound: float) -> np.ndarray:
+        return np.array([coast_bound / 2, 0.0, 0.0, sim.total_burn_budget() / 2])
+
+    def bounds(self, sim: "Simulator", coast_bound: float) -> list[tuple[float, float]]:
+        return [
+            (0.0, coast_bound),
+            (-5.0, 5.0),
+            (-1.0, 1.0),
+            (0.0, sim.total_burn_budget()),
+        ]
+
+    def evaluate(
+        self, sim: "Simulator", coast_fn: Callable[[float], np.ndarray], ref_angle: float, x: np.ndarray
+    ) -> float:
+        coast_time, a_coeff, b_coeff, burn_time = x
+        r, v = to_rv(coast_fn(coast_time))
+        return sim.propagate_linear_tangent(
+            r, v, a_coeff, b_coeff, ref_angle, burn_time
+        ).error
+
+    def get_final_state(
+        self, sim: "Simulator", coast_fn: Callable[[float], np.ndarray], ref_angle: float, x: np.ndarray
+    ) -> tuple[np.ndarray, np.ndarray, float]:
+        """Return (r, v, burn_time) at the optimal solution."""
+        coast_time, a_coeff, b_coeff, burn_time = x
+        r, v = to_rv(coast_fn(coast_time))
+        result = sim.propagate_linear_tangent(
+            r, v, a_coeff, b_coeff, ref_angle, burn_time
+        )
+        return (result.r, result.v, burn_time)
+
+
 class Simulator:
     """Orbital simulation."""
 
@@ -296,6 +436,49 @@ class Simulator:
             atol=self.ATOL_THRUST_VECTOR,
             dense_output=True,
         )
+
+    @_validate
+    def total_burn_budget(self) -> float:
+        """Total burn time available across all remaining stages."""
+        return sum(stage.max_burn_time for stage in self.stages)
+
+    @_validate
+    def propagate_linear_tangent(
+        self,
+        r: np.ndarray,
+        v: np.ndarray,
+        a_coeff: float,
+        b_coeff: float,
+        ref_angle: float,
+        burn_time: float,
+    ) -> BurnResult:
+        """Burn under the linear-tangent steering law for `burn_time` seconds,
+        walking across stage boundaries (with a 1 second staging coast
+        between them) as needed.
+
+        `burn_time` is measured from the start of the current (first) stage,
+        i.e. it's the total elapsed burn time, not a per-stage time.
+        """
+        remaining = burn_time
+        mass = math.nan
+
+        for stage in self.stages:
+            solution = self.solve_linear_tangent(r, v, stage, a_coeff, b_coeff, ref_angle)
+            assert solution.sol is not None
+
+            if remaining <= stage.max_burn_time:
+                state = solution.sol(remaining)
+                r, v, mass = to_rvm(state)
+                return BurnResult(r, v, mass, self.error(state))
+
+            remaining -= stage.max_burn_time
+            r, v, mass = to_rvm(solution.y[:, -1])
+            # Simulate staging as a 1 second coast.
+            coast = self.solve_coast((0, 1.0), r, v)
+            r, v = to_rv(coast.y[:, -1])
+
+        # Ran out of stages before using all of the requested burn time.
+        return BurnResult(r, v, mass, MAX_ERROR)
 
     # Returns error?  This is after the coast, starts with the actual burn.
     @_validate
@@ -392,42 +575,69 @@ class Simulator:
 
     @_validate
     def find_linear_tangent_params(
-        self, r3d: np.ndarray, v3d: np.ndarray, time_to_apoapsis: float
-    ) -> None:
-        initial_mass = self.stages[0].initial_mass
+        self,
+        r3d: np.ndarray,
+        v3d: np.ndarray,
+        time_to_apoapsis: float,
+        regime: Regime,
+    ) -> OptimizeResult:
+        """Find linear-tangent steering parameters that circularize the
+        orbit, using whichever free-parameter set `regime` defines (e.g.
+        Regime3D or Regime4D). See the `Regime` class for how to add more.
+        """
         r_hat, w_hat, r, v = project(r3d, v3d)
 
         # Find the prograde direction at apoapsis
         orbit = orbital_elements(r, v, self.mu)
 
-        ref_angle = prograde_at_apoapsis(orbit)
+        ref_angle = self.prograde_at_apoapsis(orbit)
 
         # Our goal is to raise periapsis to get us into orbit.  So periapsis
-        # should be below tart or someone is very confused.
+        # should be below target or someone is very confused.
         assert orbit["periapsis_radius"] < self.target_radius
 
-        # Simulate coasting (no thrust) up until apopasis.  We know we need to burn
+        # Simulate coasting (no thrust) up until apoapsis.  We know we need to burn
         # before apoapsis, so that's a good upper bound on when to start burning.
         sol = self.solve_coast((0, time_to_apoapsis), r, v)
         assert sol.sol is not None
         coast_fn = sol.sol
 
-        # Returns error.
-        @_validate
-        def to_orbit(params, blah) -> float:
-            coast_time, a_coeff, b_coeff = params
-            r, v = to_rv(coast_fn(coast_time))
+        def objective(x: np.ndarray) -> float:
+            return regime.evaluate(self, coast_fn, ref_angle, x)
 
-            # Iterate over stages to find the one where we'll achieve our periapsis
-            # goal.
-            for stage in self.stages:
-                solution = self.solve_linear_tangent(
-                    r, v, stage, a_coeff, b_coeff, ref_angle
-                )
+        res = minimize(
+            objective,
+            x0=regime.x0(self, time_to_apoapsis),
+            bounds=regime.bounds(self, time_to_apoapsis),
+            method="Nelder-Mead",
+            options={"xatol": 0.01, "fatol": 1.0},
+        )
 
-                # TODO: start here, look at circularization_burn.
+        # Fetch the final state at the optimal solution
+        r_final, v_final, burn_time = regime.get_final_state(
+            self, coast_fn, ref_angle, res.x
+        )
+        final_orbit = orbital_elements(r_final, v_final, self.mu)
 
-            return 0.0  # TODO: implement
+        # Extract parameters
+        if isinstance(regime, Regime3D):
+            coast_time, a_coeff, b_coeff = res.x
+        else:  # Regime4D
+            coast_time, a_coeff, b_coeff, burn_time = res.x
+
+        # Print summary
+        print(f"\n***** Regime: {regime.name}")
+        print(f"Coast time:        {coast_time:8.2f} s")
+        print(f"a coefficient:     {a_coeff:8.6f}")
+        print(f"b coefficient:     {b_coeff:8.6f}")
+        print(f"Burn time:         {burn_time:8.2f} s")
+        print(f"RMS orbital error: {res.fun:8.2f} m")
+        ap_alt = final_orbit["apoapsis_radius"] - KERBIN_RADIUS
+        pe_alt = final_orbit["periapsis_radius"] - KERBIN_RADIUS
+        print(f"Apoapsis:          {ap_alt:8.2f} m")
+        print(f"Periapsis:         {pe_alt:8.2f} m")
+        print()
+        return res
 
     # INITIAL ENTRY POINT.
     @_validate
@@ -437,7 +647,7 @@ class Simulator:
         initial_mass = self.stages[0].initial_mass
         r_hat, w_hat, r, v = project(r3d, v3d)
 
-        # Simulate coasting (no thrust) up until apopasis.  We know we need to burn
+        # Simulate coasting (no thrust) up until apoapsis.  We know we need to burn
         # before apoapsis, so that's a good upper bound on when to start burning.
         sol = self.solve_coast((0, time_to_apoapsis), r, v)
         assert sol.sol is not None
@@ -530,7 +740,12 @@ def main():
 
         TIME_TO_APOAPSIS = 103.31401749403551
 
-        sim.find_burn_params(R3D, V3D, TIME_TO_APOAPSIS)
+        # Switch which optimization regime to experiment with here.  See the
+        # Regime class (and Regime3D / Regime4D) in sim.py to add more.
+        regime: Regime = Regime3D()
+        # regime: Regime = Regime3D()
+
+        sim.find_linear_tangent_params(R3D, V3D, TIME_TO_APOAPSIS, regime)
 
 
 if __name__ == "__main__":
