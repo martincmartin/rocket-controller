@@ -70,9 +70,7 @@ def cross2d(r: Vector, v: Vector) -> float:
 
 
 @_validate
-def project(
-    r: Vector, v: Vector
-) -> tuple[Vector, Vector, Vector, Vector]:
+def project(r: Vector, v: Vector) -> tuple[Vector, Vector, Vector, Vector]:
     # r = 0 means at the center of the body; since we're above the surface,
     # r should never be close to zero, so we can divide with confidence.
     r_norm = np.linalg.norm(r)
@@ -100,12 +98,12 @@ def project(
 
 def to_rv(state: Vector) -> tuple[Vector, Vector]:
     x, y, vx, vy = state
-    return (np.array([x, y], dtype=np.float64), np.array([vx, vy], dtype=np.float64))
+    return (np.array([x, y]), np.array([vx, vy]))
 
 
-def to_rvm(state: Vector) -> tuple[Vector, Vector, float]:
+def to_rvm(state: Vector) -> tuple[Vector, Vector, np.float64]:
     x, y, vx, vy, mass = state
-    return (np.array([x, y], dtype=np.float64), np.array([vx, vy], dtype=np.float64), float(mass))
+    return (np.array([x, y]), np.array([vx, vy]), mass)
 
 
 def coast_dynamics(t: float, state: np.ndarray, mu: float) -> list[float]:
@@ -194,9 +192,7 @@ def linear_tangent_dynamics(
 
 
 @_validate
-def orbital_elements(
-    r: Vector, v: Vector, mu: float
-) -> OrbitalElements:
+def orbital_elements(r: Vector, v: Vector, mu: float) -> OrbitalElements:
     """
     Compute orbital elements from 2D position and velocity vectors.
 
@@ -285,7 +281,11 @@ class Regime(ABC):
 
     @abstractmethod
     def evaluate(
-        self, sim: "Simulator", coast_fn: Callable[[float], Vector], ref_angle: float, x: np.ndarray
+        self,
+        sim: "Simulator",
+        coast_fn: Callable[[float], Vector],
+        ref_angle: float,
+        x: np.ndarray,
     ) -> tuple[float, Vector, Vector, float]:
         """Map an optimizer vector x to (error, r, v, burn_time)."""
 
@@ -307,7 +307,11 @@ class Regime3D(Regime):
         return [(0.0, coast_bound), (-5.0, 5.0), (-1.0, 1.0)]
 
     def evaluate(
-        self, sim: "Simulator", coast_fn: Callable[[float], Vector], ref_angle: float, x: np.ndarray
+        self,
+        sim: "Simulator",
+        coast_fn: Callable[[float], Vector],
+        ref_angle: float,
+        x: np.ndarray,
     ) -> tuple[float, Vector, Vector, float]:
         coast_time, a_coeff, b_coeff = x
         r, v = to_rv(coast_fn(coast_time))
@@ -322,9 +326,7 @@ class Regime3D(Regime):
             inner, bounds=(0.0, budget), method="bounded", options={"xatol": 0.01}
         )
         # Fetch the final state at the optimal burn_time
-        result = sim.propagate_linear_tangent(
-            r, v, a_coeff, b_coeff, ref_angle, res.x
-        )
+        result = sim.propagate_linear_tangent(r, v, a_coeff, b_coeff, ref_angle, res.x)
         return (res.fun, result.r, result.v, res.x)
 
 
@@ -346,7 +348,11 @@ class Regime4D(Regime):
         ]
 
     def evaluate(
-        self, sim: "Simulator", coast_fn: Callable[[float], Vector], ref_angle: float, x: np.ndarray
+        self,
+        sim: "Simulator",
+        coast_fn: Callable[[float], Vector],
+        ref_angle: float,
+        x: np.ndarray,
     ) -> tuple[float, Vector, Vector, float]:
         coast_time, a_coeff, b_coeff, burn_time = x
         r, v = to_rv(coast_fn(coast_time))
@@ -449,7 +455,9 @@ class Simulator:
         mass = math.nan
 
         for stage in self.stages:
-            solution = self.solve_linear_tangent(r, v, stage, a_coeff, b_coeff, ref_angle)
+            solution = self.solve_linear_tangent(
+                r, v, stage, a_coeff, b_coeff, ref_angle
+            )
             assert solution.sol is not None
 
             if remaining <= stage.max_burn_time:
@@ -458,9 +466,11 @@ class Simulator:
                 return BurnResult(r, v, mass, self.error(state))
 
             remaining -= stage.max_burn_time
+            # Cast needed because y is type ndarray[float64 | complex128]
             r, v, mass = to_rvm(cast(Vector, solution.y[:, -1]))
             # Simulate staging as a 1 second coast.
             coast = self.solve_coast((0, 1.0), r, v)
+            # Cast needed because y is type ndarray[float64 | complex128]
             r, v = to_rv(cast(Vector, coast.y[:, -1]))
 
         # Ran out of stages before using all of the requested burn time.
@@ -490,6 +500,7 @@ class Simulator:
 
             # print(f"{solution.y}")
 
+            # Cast needed because y is type ndarray[float64 | complex128]
             r, v, _ = to_rvm(cast(Vector, solution.y[:, -1]))
             orbit = orbital_elements(r, v, self.mu)
             if orbit.periapsis_radius >= self.target_radius:
@@ -506,6 +517,7 @@ class Simulator:
             )
             # Simulate staging as a 1 second coast.
             solution = self.solve_coast((0, 1.0), r, v)
+            # Cast needed because y is type ndarray[float64 | complex128]
             r, v = to_rv(cast(Vector, solution.y[:, -1]))
 
         return MAX_ERROR
