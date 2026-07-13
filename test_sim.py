@@ -312,7 +312,9 @@ def test_target_velocity_magnitude_and_perpendicularity(sim):
 
 def test_target_velocity_ccw_direction():
     """At r=(R,0) with a CCW-pointing v (+y), target velocity should point +y."""
-    sim = Simulator(MU, body_radius=KERBIN_RADIUS, target_altitude=TARGET_ALTITUDE, stages=[])
+    sim = Simulator(
+        MU, body_radius=KERBIN_RADIUS, target_altitude=TARGET_ALTITUDE, stages=[]
+    )
     R = 680_000.0
     r = vector(R, 0.0)
     v = vector(0.0, 1.0)  # tiny CCW-pointing velocity
@@ -325,7 +327,9 @@ def test_target_velocity_ccw_direction():
 
 def test_target_velocity_cw_direction():
     """At r=(R,0) with a CW-pointing v (-y), target velocity should point -y."""
-    sim = Simulator(MU, body_radius=KERBIN_RADIUS, target_altitude=TARGET_ALTITUDE, stages=[])
+    sim = Simulator(
+        MU, body_radius=KERBIN_RADIUS, target_altitude=TARGET_ALTITUDE, stages=[]
+    )
     R = 680_000.0
     r = vector(R, 0.0)
     v = vector(0.0, -1.0)  # tiny CW-pointing velocity
@@ -340,7 +344,9 @@ def test_target_velocity_rotated_position():
     """At r=(0,R) with CCW-pointing v (-x direction, per the CCW convention
     used elsewhere in this file: periapsis along +y, CCW velocity is -x),
     target velocity should point in -x."""
-    sim = Simulator(MU, body_radius=KERBIN_RADIUS, target_altitude=TARGET_ALTITUDE, stages=[])
+    sim = Simulator(
+        MU, body_radius=KERBIN_RADIUS, target_altitude=TARGET_ALTITUDE, stages=[]
+    )
     R = 680_000.0
     r = vector(0.0, R)
     v = vector(-1.0, 0.0)
@@ -353,7 +359,9 @@ def test_target_velocity_rotated_position():
 
 def test_target_velocity_independent_of_input_speed_magnitude():
     """Only the sign/direction of v should matter, not its magnitude."""
-    sim = Simulator(MU, body_radius=KERBIN_RADIUS, target_altitude=TARGET_ALTITUDE, stages=[])
+    sim = Simulator(
+        MU, body_radius=KERBIN_RADIUS, target_altitude=TARGET_ALTITUDE, stages=[]
+    )
     r = vector(680_000.0, 0.0)
 
     slow = sim.target_velocity(r, vector(0.0, 1.0))
@@ -366,7 +374,9 @@ def test_target_velocity_with_radial_component_ccw():
     """v has both a radial (+x, outward) and a CCW tangential (+y) component.
     The radial component should be ignored; result should match the pure
     CCW-tangential case."""
-    sim = Simulator(MU, body_radius=KERBIN_RADIUS, target_altitude=TARGET_ALTITUDE, stages=[])
+    sim = Simulator(
+        MU, body_radius=KERBIN_RADIUS, target_altitude=TARGET_ALTITUDE, stages=[]
+    )
     R = 680_000.0
     r = vector(R, 0.0)
     v = vector(200.0, 3000.0)  # radial + CCW tangential
@@ -381,7 +391,9 @@ def test_target_velocity_with_radial_component_ccw():
 def test_target_velocity_with_radial_component_cw():
     """v has both a radial (-x, inward) and a CW tangential (-y) component.
     The radial component (and its sign) should not affect the result."""
-    sim = Simulator(MU, body_radius=KERBIN_RADIUS, target_altitude=TARGET_ALTITUDE, stages=[])
+    sim = Simulator(
+        MU, body_radius=KERBIN_RADIUS, target_altitude=TARGET_ALTITUDE, stages=[]
+    )
     R = 680_000.0
     r = vector(R, 0.0)
     v = vector(-200.0, -3000.0)  # radial (inward) + CW tangential
@@ -397,7 +409,9 @@ def test_target_velocity_purely_radial_input_defaults_to_ccw():
     """Edge case: if v has zero tangential component (purely radial), the
     flip condition (`dot < 0`) never triggers, so the implementation
     defaults to the CCW direction.  This test documents that behavior."""
-    sim = Simulator(MU, body_radius=KERBIN_RADIUS, target_altitude=TARGET_ALTITUDE, stages=[])
+    sim = Simulator(
+        MU, body_radius=KERBIN_RADIUS, target_altitude=TARGET_ALTITUDE, stages=[]
+    )
     R = 680_000.0
     r = vector(R, 0.0)
     v = vector(500.0, 0.0)  # purely radial, no tangential component
@@ -410,7 +424,9 @@ def test_target_velocity_purely_radial_input_defaults_to_ccw():
 
 def test_target_velocity_arbitrary_angle_ccw():
     """r at an arbitrary angle (not on an axis); v purely tangential CCW."""
-    sim = Simulator(MU, body_radius=KERBIN_RADIUS, target_altitude=TARGET_ALTITUDE, stages=[])
+    sim = Simulator(
+        MU, body_radius=KERBIN_RADIUS, target_altitude=TARGET_ALTITUDE, stages=[]
+    )
     R = 750_000.0
     theta = math.radians(37.0)  # arbitrary angle, not a multiple of 45
     r = vector(R * math.cos(theta), R * math.sin(theta))
@@ -431,7 +447,9 @@ def test_target_velocity_arbitrary_angle_cw_with_radial_component():
     """r at an arbitrary angle, in a different quadrant; v has both a
     radial (outward) and a CW tangential component.  Result direction
     should follow the tangential (CW) sign, ignoring the radial part."""
-    sim = Simulator(MU, body_radius=KERBIN_RADIUS, target_altitude=TARGET_ALTITUDE, stages=[])
+    sim = Simulator(
+        MU, body_radius=KERBIN_RADIUS, target_altitude=TARGET_ALTITUDE, stages=[]
+    )
     R = 750_000.0
     theta = math.radians(163.0)  # arbitrary angle, second quadrant
     r = vector(R * math.cos(theta), R * math.sin(theta))

@@ -24,14 +24,14 @@ _validate = validate_call(config=ConfigDict(arbitrary_types_allowed=True))
 
 class TimingContext:
     """Context manager for measuring wall clock time, CPU time, and resource usage.
-    
+
     Captures timing and resource metrics on entry/exit, with optional auto-print.
     Reusable across different methods and scenarios.
     """
-    
+
     def __init__(self, label: str = "", auto_print: bool = True) -> None:
         """Initialize timing context.
-        
+
         Parameters
         ----------
         label : str
@@ -41,38 +41,38 @@ class TimingContext:
         """
         self.label = label
         self.auto_print = auto_print
-        
+
         # Timing metrics
         self.wall_time: float = 0.0
         self.user_time: float = 0.0
         self.system_time: float = 0.0
-        
+
         # Resource metrics from getrusage
         self.peak_memory_kb: float = 0.0  # ru_maxrss
-        self.minor_page_faults: int = 0    # ru_minflt (memory not on disk)
-        self.major_page_faults: int = 0    # ru_majflt (memory on disk, required I/O)
-        self.voluntary_context_switches: int = 0   # ru_nvcsw (yield/blocking)
+        self.minor_page_faults: int = 0  # ru_minflt (memory not on disk)
+        self.major_page_faults: int = 0  # ru_majflt (memory on disk, required I/O)
+        self.voluntary_context_switches: int = 0  # ru_nvcsw (yield/blocking)
         self.involuntary_context_switches: int = 0  # ru_nivcsw (preemption)
-        self.input_blocks: int = 0         # ru_inblock
-        self.output_blocks: int = 0        # ru_oublock
-        
+        self.input_blocks: int = 0  # ru_inblock
+        self.output_blocks: int = 0  # ru_oublock
+
         # Internal state
         self._start_wall: float = 0.0
         self._start_rusage: Optional[resource.struct_rusage] = None
-    
+
     def __enter__(self) -> "TimingContext":
         """Start timing."""
         self._start_wall = time.perf_counter()
         self._start_rusage = resource.getrusage(resource.RUSAGE_SELF)
         return self
-    
+
     def __exit__(self, *args: Any) -> None:
         """Stop timing and optionally print summary."""
         end_wall = time.perf_counter()
         end_rusage = resource.getrusage(resource.RUSAGE_SELF)
-        
+
         assert self._start_rusage is not None
-        
+
         # Calculate deltas
         self.wall_time = end_wall - self._start_wall
         self.user_time = end_rusage.ru_utime - self._start_rusage.ru_utime
@@ -88,10 +88,10 @@ class TimingContext:
         )
         self.input_blocks = end_rusage.ru_inblock - self._start_rusage.ru_inblock
         self.output_blocks = end_rusage.ru_oublock - self._start_rusage.ru_oublock
-        
+
         if self.auto_print:
             print(self.summary())
-    
+
     def summary(self) -> str:
         """Return formatted timing and resource summary."""
         lines = []
@@ -99,34 +99,38 @@ class TimingContext:
             lines.append(f"\n***** Timing: {self.label}")
         else:
             lines.append("\n***** Timing Summary")
-        
+
         # CPU and wall clock timing
         cpu_total = self.user_time + self.system_time
         cpu_pct = (cpu_total / self.wall_time * 100) if self.wall_time > 0 else 0.0
-        
+
         lines.append(f"Wall clock time:           {self.wall_time:8.3f} s")
         lines.append(f"User CPU time:             {self.user_time:8.3f} s")
         lines.append(f"System CPU time:           {self.system_time:8.3f} s")
         lines.append(f"Total CPU time:            {cpu_total:8.3f} s ({cpu_pct:5.1f}%)")
-        
+
         # Memory and page faults
         # On macOS and BSD, ru_maxrss is in bytes; on Linux it's in KB
-        if sys.platform == 'darwin' or sys.platform.startswith('freebsd'):
+        if sys.platform == "darwin" or sys.platform.startswith("freebsd"):
             peak_memory_mb = self.peak_memory_kb / (1024 * 1024)  # bytes to MB
         else:  # Linux
             peak_memory_mb = self.peak_memory_kb / 1024  # KB to MB
         lines.append(f"Peak memory:               {peak_memory_mb:8.1f} MB")
         lines.append(f"Minor page faults:         {self.minor_page_faults:8d}")
         lines.append(f"Major page faults:         {self.major_page_faults:8d}")
-        
+
         # Context switches
-        lines.append(f"Voluntary context switches: {self.voluntary_context_switches:8d}")
-        lines.append(f"Involuntary context switches: {self.involuntary_context_switches:8d}")
-        
+        lines.append(
+            f"Voluntary context switches: {self.voluntary_context_switches:8d}"
+        )
+        lines.append(
+            f"Involuntary context switches: {self.involuntary_context_switches:8d}"
+        )
+
         # I/O
         lines.append(f"Input blocks (fsync):      {self.input_blocks:8d}")
         lines.append(f"Output blocks (fsync):     {self.output_blocks:8d}")
-        
+
         return "\n".join(lines)
 
 
@@ -514,7 +518,9 @@ class Simulator:
         (coast_time, a_coeff, b_coeff, burn_time) combination that satisfies
         both constraints.
         """
-        with TimingContext(label="find_linear_tangent_params", auto_print=False) as timer:
+        with TimingContext(
+            label="find_linear_tangent_params", auto_print=False
+        ) as timer:
             r_hat, w_hat, r, v = project(r3d, v3d)
 
             # Find the prograde direction at apoapsis
@@ -597,9 +603,7 @@ class Simulator:
         pe_alt = final_orbit.periapsis_radius - KERBIN_RADIUS
         print(f"Apoapsis:            {ap_alt:8.2f} m")
         print(f"Periapsis:           {pe_alt:8.2f} m")
-        print(
-            f"Velocity residual:  ({eq_residual[0]:8.4f}, {eq_residual[1]:8.4f}) m/s"
-        )
+        print(f"Velocity residual:  ({eq_residual[0]:8.4f}, {eq_residual[1]:8.4f}) m/s")
         print(f"Radius residual:     {ineq_residual[0]:8.2f} m")
         print(f"Optimizer success:   {res.success} ({res.message})")
         print(timer.summary())
