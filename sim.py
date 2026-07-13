@@ -109,7 +109,7 @@ class TimingContext:
         lines.append(f"Total CPU time:            {cpu_total:8.3f} s ({cpu_pct:5.1f}%)")
         
         # Memory and page faults
-        lines.append(f"Peak memory:               {self.peak_memory_kb:8.0f} KB")
+        lines.append(f"Peak memory:               {self.peak_memory_kb / 1024:8.1f} MB")
         lines.append(f"Minor page faults:         {self.minor_page_faults:8d}")
         lines.append(f"Major page faults:         {self.major_page_faults:8d}")
         
