@@ -285,7 +285,7 @@ class Regime(ABC):
         sim: "Simulator",
         coast_fn: Callable[[float], Vector],
         ref_angle: float,
-        x: np.ndarray,
+        params: np.ndarray,
     ) -> tuple[float, Vector, Vector, float]:
         """Map an optimizer vector x to (error, r, v, burn_time)."""
 
@@ -311,9 +311,9 @@ class Regime3D(Regime):
         sim: "Simulator",
         coast_fn: Callable[[float], Vector],
         ref_angle: float,
-        x: np.ndarray,
+        params: np.ndarray,
     ) -> tuple[float, Vector, Vector, float]:
-        coast_time, a_coeff, b_coeff = x
+        coast_time, a_coeff, b_coeff = params
         r, v = to_rv(coast_fn(coast_time))
         budget = sim.total_burn_budget()
 
@@ -352,9 +352,9 @@ class Regime4D(Regime):
         sim: "Simulator",
         coast_fn: Callable[[float], Vector],
         ref_angle: float,
-        x: np.ndarray,
+        params: np.ndarray,
     ) -> tuple[float, Vector, Vector, float]:
-        coast_time, a_coeff, b_coeff, burn_time = x
+        coast_time, a_coeff, b_coeff, burn_time = params
         r, v = to_rv(coast_fn(coast_time))
         result = sim.propagate_linear_tangent(
             r, v, a_coeff, b_coeff, ref_angle, burn_time
@@ -570,6 +570,35 @@ class Simulator:
             prograde_y = ex
 
         return math.atan2(prograde_y, prograde_x)
+
+    @_validate
+    def target_velocity(self, r: Vector, v: Vector) -> Vector:
+        """Compute the 2D velocity vector for a circular orbit at position r.
+
+        For a circular orbit, the velocity is perpendicular to the position vector.
+        This method returns the perpendicular velocity direction aligned with the
+        current velocity vector v.
+
+        Parameters
+        ----------
+        r : array_like, shape (2,)
+            Position vector [m]
+        v : array_like, shape (2,)
+            Current velocity vector [m/s] - used to determine direction
+
+        Returns
+        -------
+        Vector
+            Velocity vector [m/s] for a circular orbit
+        """
+        r_mag = np.linalg.norm(r)
+        v_mag = np.sqrt(self.mu / r_mag)
+        # Perpendicular to r in counterclockwise direction (90° rotation)
+        v_direction = np.array([-r[1], r[0]]) / r_mag
+        # Flip direction if it points opposite to current velocity
+        if np.dot(v_direction, v) < 0:
+            v_direction = -v_direction
+        return cast(Vector, v_mag * v_direction)
 
     @_validate
     def find_linear_tangent_params(
