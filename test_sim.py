@@ -14,6 +14,7 @@ from sim import (
     orbital_elements,
     project,
     to_rv,
+    to_rvm,
 )
 
 KERBIN_RADIUS = 600_000
@@ -546,3 +547,99 @@ def test_find_linear_tangent_params_memoizes_simulation(monkeypatch):
         "arguments; memoization should have deduped these."
     )
     assert len(calls) > 0
+
+
+# --- Continuous-time / staging-time bookkeeping tests ---
+
+
+def test_solve_linear_tangent_t_offset(sim):
+    """solve_linear_tangent's t domain should start at t_offset (not 0),
+    so that the linear-tangent steering law's time reference continues
+    from wherever a previous stage left off."""
+    r_hat, w_hat, r0, v0 = project(R3D, V3D)
+    t_offset = 100.0
+
+    solution = sim.solve_linear_tangent(
+        r0, v0, SWIVEL, 0.0, 0.0, 0.0, t_offset=t_offset
+    )
+    assert solution.sol is not None
+
+    assert solution.t[0] == pytest.approx(t_offset)
+    assert solution.t[-1] == pytest.approx(t_offset + SWIVEL.max_burn_time)
+
+    initial_state = solution.sol(t_offset)
+    assert initial_state[0] == pytest.approx(r0[0])
+    assert initial_state[1] == pytest.approx(r0[1])
+    assert initial_state[2] == pytest.approx(v0[0])
+    assert initial_state[3] == pytest.approx(v0[1])
+    assert initial_state[4] == pytest.approx(SWIVEL.initial_mass)
+
+
+def test_total_burn_budget_includes_staging(sim):
+    expected = SWIVEL.max_burn_time + TERRIER.max_burn_time + 1.0
+    assert sim.total_burn_budget() == pytest.approx(expected)
+
+
+def test_total_burn_budget_single_stage_no_staging():
+    single_stage_sim = Simulator(
+        MU, body_radius=KERBIN_RADIUS, target_altitude=TARGET_ALTITUDE, stages=[SWIVEL]
+    )
+    assert single_stage_sim.total_burn_budget() == pytest.approx(SWIVEL.max_burn_time)
+
+
+def test_propagate_linear_tangent_burn_time_includes_staging_seconds(sim):
+    """burn_time should include the 1 second staging coast, so the second
+    stage should only burn for `burn_time - stage1.max_burn_time - 1.0`
+    seconds, not `burn_time - stage1.max_burn_time`."""
+    r_hat, w_hat, r0, v0 = project(R3D, V3D)
+    partial_stage2_time = 10.0
+    burn_time = SWIVEL.max_burn_time + 1.0 + partial_stage2_time
+
+    result = sim.propagate_linear_tangent(r0, v0, 0.0, 0.0, 0.0, burn_time)
+
+    mdot2 = TERRIER.thrust / TERRIER.ve
+    expected_mass = TERRIER.initial_mass - mdot2 * partial_stage2_time
+    assert result.mass == pytest.approx(expected_mass)
+
+
+def test_propagate_linear_tangent_deadline_inside_staging_window(sim):
+    """If burn_time's deadline falls inside the mandatory 1 second staging
+    coast, only a partial coast should be applied, and stage 2 should not
+    be started at all."""
+    r_hat, w_hat, r0, v0 = project(R3D, V3D)
+    partial_staging_time = 0.5
+    burn_time = SWIVEL.max_burn_time + partial_staging_time
+
+    result = sim.propagate_linear_tangent(r0, v0, 0.0, 0.0, 0.0, burn_time)
+
+    # Manually reproduce: burn stage 1 fully, then coast for only
+    # partial_staging_time (not the full 1.0 second).
+    solution1 = sim.solve_linear_tangent(r0, v0, SWIVEL, 0.0, 0.0, 0.0)
+    r1, v1, mass1 = to_rvm(solution1.y[:, -1])
+    coast = sim.solve_coast((0, partial_staging_time), r1, v1)
+    r_expected, v_expected = to_rv(coast.y[:, -1])
+
+    assert result.mass == pytest.approx(mass1)
+    assert result.r == pytest.approx(r_expected)
+    assert result.v == pytest.approx(v_expected)
+
+
+def test_propagate_linear_tangent_continuous_time_across_stages(sim, monkeypatch):
+    """solve_linear_tangent's t_offset should continue from wherever the
+    previous stage plus staging coast left off, not reset to 0 at the
+    start of each stage."""
+    r_hat, w_hat, r0, v0 = project(R3D, V3D)
+
+    t_offsets: list[float] = []
+    original = Simulator.solve_linear_tangent
+
+    def spy(self, r, v, stage, a_coeff, b_coeff, ref_angle, t_offset=0.0):
+        t_offsets.append(t_offset)
+        return original(self, r, v, stage, a_coeff, b_coeff, ref_angle, t_offset)
+
+    monkeypatch.setattr(Simulator, "solve_linear_tangent", spy)
+
+    burn_time = SWIVEL.max_burn_time + 1.0 + 10.0
+    sim.propagate_linear_tangent(r0, v0, 0.0, 0.0, 0.0, burn_time)
+
+    assert t_offsets == [pytest.approx(0.0), pytest.approx(SWIVEL.max_burn_time + 1.0)]

@@ -392,10 +392,11 @@ class Simulator:
         a_coeff: float,
         b_coeff: float,
         ref_angle: float,
+        t_offset: float = 0.0,
     ) -> OdeResult:
         return solve_ivp(
             linear_tangent_dynamics,
-            (0, stage.max_burn_time),
+            (t_offset, t_offset + stage.max_burn_time),
             (r[0], r[1], v[0], v[1], stage.initial_mass),
             args=(self.mu, stage.ve, stage.thrust, a_coeff, b_coeff, ref_angle),
             rtol=1e-10,
@@ -405,8 +406,11 @@ class Simulator:
 
     @_validate
     def total_burn_budget(self) -> float:
-        """Total burn time available across all remaining stages."""
-        return sum(stage.max_burn_time for stage in self.stages)
+        """Total elapsed time available across all remaining stages,
+        including the mandatory 1 second staging coast between each pair of
+        stages."""
+        n = len(self.stages)
+        return sum(stage.max_burn_time for stage in self.stages) + max(0, n - 1) * 1.0
 
     @_validate
     def propagate_linear_tangent(
@@ -418,34 +422,53 @@ class Simulator:
         ref_angle: float,
         burn_time: float,
     ) -> BurnResult:
-        """Burn under the linear-tangent steering law for `burn_time` seconds,
-        walking across stage boundaries (with a 1 second staging coast
-        between them) as needed.
+        """Burn under the linear-tangent steering law for `burn_time` seconds
+        total, walking across stage boundaries (with a 1 second staging
+        coast between them) as needed.
 
-        `burn_time` is measured from the start of the current (first) stage,
-        i.e. it's the total elapsed burn time, not a per-stage time.
+        `burn_time` is the total elapsed time from the start of the first
+        stage, including any 1 second staging coasts along the way. The
+        time reference `t` used for the linear-tangent steering law (see
+        `linear_tangent_dynamics`) is likewise continuous across stage
+        boundaries and staging coasts: it is never reset to 0 at the start
+        of a later stage.
         """
         remaining = burn_time
+        elapsed = 0.0
         mass = math.nan
+        n_stages = len(self.stages)
 
-        for stage in self.stages:
+        for i, stage in enumerate(self.stages):
             solution = self.solve_linear_tangent(
-                r, v, stage, a_coeff, b_coeff, ref_angle
+                r, v, stage, a_coeff, b_coeff, ref_angle, t_offset=elapsed
             )
             assert solution.sol is not None
 
             if remaining <= stage.max_burn_time:
-                state = solution.sol(remaining)
+                state = solution.sol(elapsed + remaining)
                 r, v, mass = to_rvm(state)
                 return BurnResult(r, v, mass, self.error(state))
 
+            # Fully burn this stage.
             remaining -= stage.max_burn_time
+            elapsed += stage.max_burn_time
             # Cast needed because y is type ndarray[float64 | complex128]
             r, v, mass = to_rvm(cast(Vector, solution.y[:, -1]))
-            # Simulate staging as a 1 second coast.
-            coast = self.solve_coast((0, 1.0), r, v)
-            # Cast needed because y is type ndarray[float64 | complex128]
-            r, v = to_rv(cast(Vector, coast.y[:, -1]))
+
+            if i < n_stages - 1:
+                # Simulate staging as a 1 second coast, which also counts
+                # against the requested burn_time budget. Clamp to
+                # `remaining` in case the deadline falls inside this window.
+                staging_duration = min(1.0, remaining)
+                coast = self.solve_coast((0, staging_duration), r, v)
+                # Cast needed because y is type ndarray[float64 | complex128]
+                r, v = to_rv(cast(Vector, coast.y[:, -1]))
+                elapsed += staging_duration
+                remaining -= staging_duration
+
+                if remaining <= 0:
+                    state = np.array([r[0], r[1], v[0], v[1], mass])
+                    return BurnResult(r, v, mass, self.error(state))
 
         # Ran out of stages before using all of the requested burn time.
         return BurnResult(r, v, mass, MAX_ERROR)

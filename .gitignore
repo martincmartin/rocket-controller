@@ -3,3 +3,4 @@ __pycache__/
 *.pyc
 *~
 .*.~undo-tree~
+PLAN.md
