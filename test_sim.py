@@ -560,7 +560,7 @@ def test_solve_linear_tangent_t_offset(sim):
     t_offset = 100.0
 
     solution = sim.solve_linear_tangent(
-        r0, v0, SWIVEL, 0.0, 0.0, 0.0, t_offset=t_offset
+        t_offset, SWIVEL.max_burn_time, r0, v0, SWIVEL, 0.0, 0.0, 0.0
     )
     assert solution.sol is not None
 
@@ -614,7 +614,9 @@ def test_propagate_linear_tangent_deadline_inside_staging_window(sim):
 
     # Manually reproduce: burn stage 1 fully, then coast for only
     # partial_staging_time (not the full 1.0 second).
-    solution1 = sim.solve_linear_tangent(r0, v0, SWIVEL, 0.0, 0.0, 0.0)
+    solution1 = sim.solve_linear_tangent(
+        0, SWIVEL.max_burn_time, r0, v0, SWIVEL, 0.0, 0.0, 0.0
+    )
     r1, v1, mass1 = to_rvm(solution1.y[:, -1])
     coast = sim.solve_coast((0, partial_staging_time), r1, v1)
     r_expected, v_expected = to_rv(coast.y[:, -1])
@@ -633,9 +635,11 @@ def test_propagate_linear_tangent_continuous_time_across_stages(sim, monkeypatch
     t_offsets: list[float] = []
     original = Simulator.solve_linear_tangent
 
-    def spy(self, r, v, stage, a_coeff, b_coeff, ref_angle, t_offset=0.0):
+    def spy(self, t_offset, duration, r, v, stage, a_coeff, b_coeff, ref_angle):
         t_offsets.append(t_offset)
-        return original(self, r, v, stage, a_coeff, b_coeff, ref_angle, t_offset)
+        return original(
+            self, t_offset, duration, r, v, stage, a_coeff, b_coeff, ref_angle
+        )
 
     monkeypatch.setattr(Simulator, "solve_linear_tangent", spy)
 

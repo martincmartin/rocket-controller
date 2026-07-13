@@ -164,20 +164,11 @@ class OrbitalElements:
 
 @dataclass
 class BurnResult:
-    """Final state after propagating a linear-tangent burn, plus its error
-    against the target orbit (see Simulator.error)."""
+    """Final state after propagating a linear-tangent burn."""
 
     r: Vector
     v: Vector
     mass: float
-    error: float
-
-
-"""
-- Verify that, after the Swivel has burned out, the mass is 9832.493492035084 .
-- Take into account staging, the mass after the stage has decoupled/start of next
-  stage, and the new thrust and ve.
-"""
 
 
 def cross2d(r: Vector, v: Vector) -> float:
@@ -386,17 +377,19 @@ class Simulator:
     @_validate
     def solve_linear_tangent(
         self,
+        t_offset: float,
+        t_duration: float,
         r: Vector,
         v: Vector,
         stage: Stage,
         a_coeff: float,
         b_coeff: float,
         ref_angle: float,
-        t_offset: float = 0.0,
     ) -> OdeResult:
+        assert t_duration <= stage.max_burn_time
         return solve_ivp(
             linear_tangent_dynamics,
-            (t_offset, t_offset + stage.max_burn_time),
+            (t_offset, t_offset + t_duration),
             (r[0], r[1], v[0], v[1], stage.initial_mass),
             args=(self.mu, stage.ve, stage.thrust, a_coeff, b_coeff, ref_angle),
             rtol=1e-10,
@@ -475,15 +468,23 @@ class Simulator:
         n_stages = len(self.stages)
 
         for i, stage in enumerate(self.stages):
+            duration = min(remaining, stage.max_burn_time)
             solution = self.solve_linear_tangent(
-                r, v, stage, a_coeff, b_coeff, ref_angle, t_offset=elapsed
+                elapsed,
+                duration,
+                r,
+                v,
+                stage,
+                a_coeff,
+                b_coeff,
+                ref_angle,
             )
             assert solution.sol is not None
 
             if remaining <= stage.max_burn_time:
-                state = solution.sol(elapsed + remaining)
-                r, v, mass = to_rvm(state)
-                return BurnResult(r, v, mass, self.error(state))
+                assert solution.t[-1] == elapsed + duration
+                r, v, mass = to_rvm(cast(Vector, solution.y[:, -1]))
+                return BurnResult(r, v, mass)
 
             # Fully burn this stage.
             remaining -= stage.max_burn_time
@@ -504,10 +505,10 @@ class Simulator:
 
                 if remaining <= 0:
                     state = np.array([r[0], r[1], v[0], v[1], mass])
-                    return BurnResult(r, v, mass, self.error(state))
+                    return BurnResult(r, v, mass)
 
         # Ran out of stages before using all of the requested burn time.
-        return BurnResult(r, v, mass, MAX_ERROR)
+        return BurnResult(r, v, mass)
 
     @staticmethod
     def prograde_at_apoapsis(orbit: OrbitalElements) -> float:
@@ -674,7 +675,6 @@ class Simulator:
         print(f"a coefficient:       {a_coeff:8.6f}")
         print(f"b coefficient:       {b_coeff:8.6f}")
         print(f"Burn time:           {burn_time:8.2f} s")
-        print(f"RMS orbital error:   {result.error:8.2f} m")
         ap_alt = final_orbit.apoapsis_radius - KERBIN_RADIUS
         pe_alt = final_orbit.periapsis_radius - KERBIN_RADIUS
         print(f"Apoapsis:            {ap_alt:8.2f} m")
@@ -684,18 +684,6 @@ class Simulator:
         print(f"Optimizer success:   {res.success} ({res.message})")
         print(timer.summary())
         return res
-
-    @_validate
-    def error(self, state: Vector) -> float:
-        r, v, _ = to_rvm(state)
-        elements = orbital_elements(r, v, self.mu)
-
-        ap = elements.apoapsis_radius
-        pe = elements.periapsis_radius
-
-        return math.sqrt(
-            ((ap - self.target_radius) ** 2 + (pe - self.target_radius) ** 2) / 2
-        )
 
 
 def main() -> None:
