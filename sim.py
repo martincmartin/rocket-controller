@@ -413,6 +413,42 @@ class Simulator:
         return sum(stage.max_burn_time for stage in self.stages) + max(0, n - 1) * 1.0
 
     @_validate
+    def burn_time_for_delta_v(self, delta_v: float) -> float:
+        """Estimate the total elapsed time (mirroring the stage/staging-coast
+        accounting in `propagate_linear_tangent`) needed to deliver
+        `delta_v` of delta-v, assuming each stage fully burns before the next
+        stage begins (with a 1 second staging coast in between).
+
+        This ignores steering losses (it assumes the full delta-v goes into
+        useful velocity change) and is meant only to produce a reasonable
+        initial guess for `burn_time`.
+        """
+        remaining_dv = delta_v
+        elapsed = 0.0
+        n_stages = len(self.stages)
+
+        for i, stage in enumerate(self.stages):
+            mdot = stage.thrust / stage.ve
+            m_final = stage.initial_mass - mdot * stage.max_burn_time
+            stage_dv = stage.ve * math.log(stage.initial_mass / m_final)
+
+            if remaining_dv <= stage_dv:
+                t = (stage.initial_mass * stage.ve / stage.thrust) * (
+                    1 - math.exp(-remaining_dv / stage.ve)
+                )
+                return elapsed + t
+
+            remaining_dv -= stage_dv
+            elapsed += stage.max_burn_time
+
+            if i < n_stages - 1:
+                elapsed += 1.0
+
+        # Ran out of stages before delivering the requested delta-v; fall
+        # back on the full burn budget as a safe upper bound.
+        return self.total_burn_budget()
+
+    @_validate
     def propagate_linear_tangent(
         self,
         r: Vector,
@@ -562,6 +598,23 @@ class Simulator:
 
             budget = self.total_burn_budget()
 
+            # Estimate initial coast_time / burn_time by computing the
+            # delta-v needed at the pre-burn apoapsis to raise the far apsis
+            # (which may switch from periapsis to apoapsis) to the target
+            # radius, then converting that delta-v to a burn time assuming
+            # each stage fully burns before the next (with 1 second staging
+            # coasts in between).
+            a_before = orbit.semi_major_axis
+            ra_before = orbit.apoapsis_radius
+            v1 = math.sqrt(self.mu * (2 / ra_before - 1 / a_before))
+            a_new = (ra_before + self.target_radius) / 2
+            v_new = math.sqrt(self.mu * (2 / ra_before - 1 / a_new))
+            delta_v = v_new - v1
+            burn_time_guess = self.burn_time_for_delta_v(delta_v)
+            coast_time_guess = min(
+                max(time_to_apoapsis - burn_time_guess / 2, 0.0), time_to_apoapsis
+            )
+
             @functools.lru_cache(maxsize=None)
             def simulate(params_tuple: tuple[float, ...]) -> BurnResult:
                 """Coast to coast_time, then burn for burn_time under the
@@ -587,7 +640,7 @@ class Simulator:
                 r_norm = np.linalg.norm(result.r)
                 return np.array([r_norm - self.target_radius])
 
-            initial_params = np.array([time_to_apoapsis / 2, 0.0, 0.0, budget / 2])
+            initial_params = np.array([coast_time_guess, 0.0, 0.0, burn_time_guess])
             bounds: list[tuple[float, float]] = [
                 (0.0, time_to_apoapsis),
                 (-5.0, 5.0),
