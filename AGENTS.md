@@ -8,3 +8,5 @@ pyright --warnings sim.py
 python3 -m pytest test_sim.py -v
 ```
 
+# Formatting
+use `ruff format .` for formatting all Python files.

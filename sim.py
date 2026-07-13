@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
 
+import functools
 import math
 import resource
+import sys
 import time
-from abc import ABC, abstractmethod
 from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any, Optional, cast
@@ -16,7 +17,7 @@ Vector = NDArray[np.float64]
 from pydantic import ConfigDict, validate_call
 from scipy.integrate import solve_ivp
 from scipy.integrate._ivp.ivp import OdeResult
-from scipy.optimize import OptimizeResult, minimize, minimize_scalar
+from scipy.optimize import NonlinearConstraint, OptimizeResult, minimize
 
 _validate = validate_call(config=ConfigDict(arbitrary_types_allowed=True))
 
@@ -109,7 +110,12 @@ class TimingContext:
         lines.append(f"Total CPU time:            {cpu_total:8.3f} s ({cpu_pct:5.1f}%)")
         
         # Memory and page faults
-        lines.append(f"Peak memory:               {self.peak_memory_kb / 1024:8.1f} MB")
+        # On macOS and BSD, ru_maxrss is in bytes; on Linux it's in KB
+        if sys.platform == 'darwin' or sys.platform.startswith('freebsd'):
+            peak_memory_mb = self.peak_memory_kb / (1024 * 1024)  # bytes to MB
+        else:  # Linux
+            peak_memory_mb = self.peak_memory_kb / 1024  # KB to MB
+        lines.append(f"Peak memory:               {peak_memory_mb:8.1f} MB")
         lines.append(f"Minor page faults:         {self.minor_page_faults:8d}")
         lines.append(f"Major page faults:         {self.major_page_faults:8d}")
         
@@ -221,32 +227,6 @@ def coast_dynamics(t: float, state: np.ndarray, mu: float) -> list[float]:
     a = -mu / r_norm**3 * r
 
     return [v[0], v[1], a[0], a[1]]
-
-
-def prograde_dynamics(
-    t: float, state: np.ndarray, mu: float, ve: float, thrust: float
-) -> list[float]:
-    r, v, mass = to_rvm(state)
-    # print(f"***** In prograde_dynamcs, {t=}")
-    # print(f"{r=}, {v=}, {mass=}")
-
-    # This is just a = F/m.  Would be easy to do in 3D if we wanted to skip the
-    # projection.
-    r_norm = np.linalg.norm(r)
-    v_norm = np.linalg.norm(v)
-
-    a = -mu / r_norm**3 * r
-
-    # print(f"{a=}")
-    if v_norm > 1e-10:
-        a += thrust / (mass * v_norm) * v
-
-        mdot = -thrust / ve
-    else:
-        mdot = 0
-
-    # print(f"{a=}, {mdot=}")
-    return [v[0], v[1], a[0], a[1], mdot]
 
 
 def linear_tangent_dynamics(
@@ -364,109 +344,6 @@ def orbital_elements(r: Vector, v: Vector, mu: float) -> OrbitalElements:
     )
 
 
-class Regime(ABC):
-    """Picks which linear-tangent parameters the outer optimizer searches
-    over directly, versus which are resolved by a nested search.
-
-    Subclasses let you experiment with different constrained optimization
-    regimes (e.g. 3D vs. 4D) without touching the simulation code: implement
-    `x0`/`bounds`/`evaluate`/`get_final_state` and pass an instance to
-    Simulator.find_linear_tangent_params.
-    """
-
-    name: str
-
-    @abstractmethod
-    def x0(self, sim: "Simulator", coast_bound: float) -> np.ndarray:
-        """Initial guess for the optimizer."""
-
-    @abstractmethod
-    def bounds(self, sim: "Simulator", coast_bound: float) -> list[tuple[float, float]]:
-        """Bounds for each free parameter, in the same order as x0()."""
-
-    @abstractmethod
-    def evaluate(
-        self,
-        sim: "Simulator",
-        coast_fn: Callable[[float], Vector],
-        ref_angle: float,
-        params: np.ndarray,
-    ) -> tuple[float, Vector, Vector, float]:
-        """Map an optimizer vector x to (error, r, v, burn_time)."""
-
-
-class Regime3D(Regime):
-    """Free params: (coast_time, a_coeff, b_coeff).
-
-    burn_time isn't searched directly; instead, for each (coast_time, a, b)
-    candidate we run a nested 1D search over burn_time to find the cutoff
-    that minimizes orbital error, and report that as the objective value.
-    """
-
-    name = "3D (coast_time, a, b; burn_time solved by nested search)"
-
-    def x0(self, sim: "Simulator", coast_bound: float) -> np.ndarray:
-        return np.array([coast_bound / 2, 0.0, 0.0])
-
-    def bounds(self, sim: "Simulator", coast_bound: float) -> list[tuple[float, float]]:
-        return [(0.0, coast_bound), (-5.0, 5.0), (-1.0, 1.0)]
-
-    def evaluate(
-        self,
-        sim: "Simulator",
-        coast_fn: Callable[[float], Vector],
-        ref_angle: float,
-        params: np.ndarray,
-    ) -> tuple[float, Vector, Vector, float]:
-        coast_time, a_coeff, b_coeff = params
-        r, v = to_rv(coast_fn(coast_time))
-        budget = sim.total_burn_budget()
-
-        def inner(burn_time: float) -> float:
-            return sim.propagate_linear_tangent(
-                r, v, a_coeff, b_coeff, ref_angle, burn_time
-            ).error
-
-        res = minimize_scalar(
-            inner, bounds=(0.0, budget), method="bounded", options={"xatol": 0.01}
-        )
-        # Fetch the final state at the optimal burn_time
-        result = sim.propagate_linear_tangent(r, v, a_coeff, b_coeff, ref_angle, res.x)
-        return (res.fun, result.r, result.v, res.x)
-
-
-class Regime4D(Regime):
-    """Free params: (coast_time, a_coeff, b_coeff, burn_time), all searched
-    simultaneously by the outer optimizer."""
-
-    name = "4D (coast_time, a, b, burn_time all searched jointly)"
-
-    def x0(self, sim: "Simulator", coast_bound: float) -> np.ndarray:
-        return np.array([coast_bound / 2, 0.0, 0.0, sim.total_burn_budget() / 2])
-
-    def bounds(self, sim: "Simulator", coast_bound: float) -> list[tuple[float, float]]:
-        return [
-            (0.0, coast_bound),
-            (-5.0, 5.0),
-            (-1.0, 1.0),
-            (0.0, sim.total_burn_budget()),
-        ]
-
-    def evaluate(
-        self,
-        sim: "Simulator",
-        coast_fn: Callable[[float], Vector],
-        ref_angle: float,
-        params: np.ndarray,
-    ) -> tuple[float, Vector, Vector, float]:
-        coast_time, a_coeff, b_coeff, burn_time = params
-        r, v = to_rv(coast_fn(coast_time))
-        result = sim.propagate_linear_tangent(
-            r, v, a_coeff, b_coeff, ref_angle, burn_time
-        )
-        return (result.error, result.r, result.v, burn_time)
-
-
 class Simulator:
     """Orbital simulation."""
 
@@ -523,18 +400,6 @@ class Simulator:
         )
 
     @_validate
-    def solve_prograde(self, r: Vector, v: Vector, stage: Stage) -> OdeResult:
-        return solve_ivp(
-            prograde_dynamics,
-            (0, stage.max_burn_time),
-            (r[0], r[1], v[0], v[1], stage.initial_mass),
-            args=(self.mu, stage.ve, stage.thrust),
-            rtol=1e-10,
-            atol=self.ATOL_THRUST_VECTOR,
-            dense_output=True,
-        )
-
-    @_validate
     def total_burn_budget(self) -> float:
         """Total burn time available across all remaining stages."""
         return sum(stage.max_burn_time for stage in self.stages)
@@ -580,83 +445,6 @@ class Simulator:
 
         # Ran out of stages before using all of the requested burn time.
         return BurnResult(r, v, mass, MAX_ERROR)
-
-    # Returns error?  This is after the coast, starts with the actual burn.
-    @_validate
-    def circularization_burn(self, r: Vector, v: Vector) -> float:
-
-        # If our periapsis is already at or above target, there's nothing to do.
-
-        orbit = orbital_elements(r, v, self.mu)
-        assert orbit.periapsis_radius < self.target_radius
-
-        # Iterate over stages to find the one where we'll achieve our periapsis
-        # goal.
-        for stage in self.stages:
-            solution = self.solve_prograde(r, v, stage)
-
-            # for t, state in zip(sol.t, sol.y.T):
-            #     x, y, vx, vy, mass = state
-            #     elements = orbital_elements(np.array([x, y]), np.array([vx, vy]), self.mu)
-            #     print(state)
-            #     print(
-            #         f't: {t}, apoapsis = {elements["apoapsis_radius"]}, periapsis = {elements["periapsis_radius"]}, mass = {mass}'
-            #     )
-
-            # print(f"{solution.y}")
-
-            # Cast needed because y is type ndarray[float64 | complex128]
-            r, v, _ = to_rvm(cast(Vector, solution.y[:, -1]))
-            orbit = orbital_elements(r, v, self.mu)
-            if orbit.periapsis_radius >= self.target_radius:
-                print(f"Stage {stage.name} will hit periapsis target.")
-                # Somewhere in this stage we hit our periapsis goal, so find
-                # the best burn time.
-                print("About to find_burn_time", flush=True)
-                ret = self.find_burn_time(solution, stage)
-                print("back from find_burn_time", flush=True)
-                return ret
-
-            print(
-                f"Stage {stage.name} will only raise periapsis to { orbit.periapsis_radius}, which is below target of {self.target_radius}"
-            )
-            # Simulate staging as a 1 second coast.
-            solution = self.solve_coast((0, 1.0), r, v)
-            # Cast needed because y is type ndarray[float64 | complex128]
-            r, v = to_rv(cast(Vector, solution.y[:, -1]))
-
-        return MAX_ERROR
-
-    # Returns error() value at the minimum burn time.
-    @_validate
-    def find_burn_time(self, solution: OdeResult, stage: Stage) -> float:
-        assert solution.sol is not None
-        sol_fn = solution.sol
-
-        def objective(t: float) -> float:
-            # print(f"** Burn for {t} sec")
-            return self.error(sol_fn(t))
-
-        res = minimize_scalar(
-            objective,
-            bounds=(0, stage.max_burn_time),
-            method="bounded",
-            options={"xatol": 0.01},  # Find burn time to with xatol seconds.
-        )
-        print(res)
-        if res.success:
-            print(f"Burn for {res.x} sec, RMS error: {res.fun / 1000.0} km")
-            r, v, _ = to_rvm(sol_fn(res.x))
-            elements = orbital_elements(r, v, self.mu)
-
-            ap = elements.apoapsis_radius
-            pe = elements.periapsis_radius
-            print(f"apo: {ap - KERBIN_RADIUS}, per: {pe - KERBIN_RADIUS}")
-
-            return res.fun
-        else:
-            print("Couldn't find burn time to minimze orbital error.", flush=True)
-            return MAX_ERROR
 
     @staticmethod
     def prograde_at_apoapsis(orbit: OrbitalElements) -> float:
@@ -711,18 +499,26 @@ class Simulator:
         r3d: Vector,
         v3d: Vector,
         time_to_apoapsis: float,
-        regime: Regime,
     ) -> OptimizeResult:
-        """Find linear-tangent steering parameters that circularize the
-        orbit, using whichever free-parameter set `regime` defines (e.g.
-        Regime3D or Regime4D). See the `Regime` class for how to add more.
+        """Find linear-tangent steering parameters (coast_time, a_coeff,
+        b_coeff, burn_time) that circularize the orbit, using SLSQP with
+        explicit constraints:
+
+          - Equality (2 components): velocity at burn end matches the
+            circular-orbit velocity for the resulting position (see
+            `target_velocity`).
+          - Inequality (1 component): final orbital radius is at least
+            `self.target_radius`.
+
+        The objective is simply `burn_time`, i.e. find the earliest
+        (coast_time, a_coeff, b_coeff, burn_time) combination that satisfies
+        both constraints.
         """
         with TimingContext(label="find_linear_tangent_params", auto_print=False) as timer:
             r_hat, w_hat, r, v = project(r3d, v3d)
 
             # Find the prograde direction at apoapsis
             orbit = orbital_elements(r, v, self.mu)
-
             ref_angle = self.prograde_at_apoapsis(orbit)
 
             # Our goal is to raise periapsis to get us into orbit.  So periapsis
@@ -735,95 +531,79 @@ class Simulator:
             assert sol.sol is not None
             coast_fn = sol.sol
 
-            def objective(x: np.ndarray) -> float:
-                error, _, _, _ = regime.evaluate(self, coast_fn, ref_angle, x)
-                return error
+            budget = self.total_burn_budget()
+
+            @functools.lru_cache(maxsize=None)
+            def simulate(params_tuple: tuple[float, ...]) -> BurnResult:
+                """Coast to coast_time, then burn for burn_time under the
+                linear-tangent steering law.  Memoized so the objective and
+                both constraint functions can share results when SLSQP
+                evaluates them at the same point."""
+                coast_time, a_coeff, b_coeff, burn_time = params_tuple
+                r0, v0 = to_rv(coast_fn(coast_time))
+                return self.propagate_linear_tangent(
+                    r0, v0, a_coeff, b_coeff, ref_angle, burn_time
+                )
+
+            def objective(params: Vector) -> float:
+                return float(params[3])  # burn_time
+
+            def eq_constraint(params: Vector) -> Vector:
+                result = simulate(tuple(params))
+                target_v = self.target_velocity(result.r, result.v)
+                return result.v - target_v
+
+            def ineq_constraint(params: Vector) -> Vector:
+                result = simulate(tuple(params))
+                r_norm = np.linalg.norm(result.r)
+                return np.array([r_norm - self.target_radius])
+
+            initial_params = np.array([time_to_apoapsis / 2, 0.0, 0.0, budget / 2])
+            bounds: list[tuple[float, float]] = [
+                (0.0, time_to_apoapsis),
+                (-5.0, 5.0),
+                (-1.0, 1.0),
+                (0.0, budget),
+            ]
+            constraints = [
+                NonlinearConstraint(eq_constraint, 0.0, 0.0),
+                NonlinearConstraint(ineq_constraint, 0.0, np.inf),
+            ]
 
             res = minimize(
                 objective,
-                x0=regime.x0(self, time_to_apoapsis),
-                bounds=regime.bounds(self, time_to_apoapsis),
-                method="Nelder-Mead",
-                options={"xatol": 0.01, "fatol": 1.0},
+                x0=initial_params,
+                bounds=bounds,
+                constraints=constraints,
+                method="SLSQP",
+                options={"ftol": 1e-6, "maxiter": 200},
             )
 
-            # Fetch the final state at the optimal solution
-            error, r_final, v_final, burn_time = regime.evaluate(
-                self, coast_fn, ref_angle, res.x
-            )
-            final_orbit = orbital_elements(r_final, v_final, self.mu)
+            final_params = cast(Vector, res.x)
+            coast_time, a_coeff, b_coeff, burn_time = final_params
+            result = simulate(tuple(final_params))
+            final_orbit = orbital_elements(result.r, result.v, self.mu)
+            eq_residual = eq_constraint(final_params)
+            ineq_residual = ineq_constraint(final_params)
 
-            # Extract parameters
-            if isinstance(regime, Regime3D):
-                coast_time, a_coeff, b_coeff = res.x
-            else:  # Regime4D
-                coast_time, a_coeff, b_coeff, burn_time = res.x
-        
         # Print summary (outside context so timing is finalized)
-        print(f"\n***** Regime: {regime.name}")
-        print(f"Coast time:        {coast_time:8.2f} s")
-        print(f"a coefficient:     {a_coeff:8.6f}")
-        print(f"b coefficient:     {b_coeff:8.6f}")
-        print(f"Burn time:         {burn_time:8.2f} s")
-        print(f"RMS orbital error: {error:8.2f} m")
+        print("\n***** SLSQP linear-tangent solution")
+        print(f"Coast time:          {coast_time:8.2f} s")
+        print(f"a coefficient:       {a_coeff:8.6f}")
+        print(f"b coefficient:       {b_coeff:8.6f}")
+        print(f"Burn time:           {burn_time:8.2f} s")
+        print(f"RMS orbital error:   {result.error:8.2f} m")
         ap_alt = final_orbit.apoapsis_radius - KERBIN_RADIUS
         pe_alt = final_orbit.periapsis_radius - KERBIN_RADIUS
-        print(f"Apoapsis:          {ap_alt:8.2f} m")
-        print(f"Periapsis:         {pe_alt:8.2f} m")
+        print(f"Apoapsis:            {ap_alt:8.2f} m")
+        print(f"Periapsis:           {pe_alt:8.2f} m")
+        print(
+            f"Velocity residual:  ({eq_residual[0]:8.4f}, {eq_residual[1]:8.4f}) m/s"
+        )
+        print(f"Radius residual:     {ineq_residual[0]:8.2f} m")
+        print(f"Optimizer success:   {res.success} ({res.message})")
         print(timer.summary())
         return res
-
-    # INITIAL ENTRY POINT.
-    @_validate
-    def find_burn_params(
-        self, r3d: Vector, v3d: Vector, time_to_apoapsis: float
-    ) -> None:
-        initial_mass = self.stages[0].initial_mass
-        r_hat, w_hat, r, v = project(r3d, v3d)
-
-        # Simulate coasting (no thrust) up until apoapsis.  We know we need to burn
-        # before apoapsis, so that's a good upper bound on when to start burning.
-        sol = self.solve_coast((0, time_to_apoapsis), r, v)
-        assert sol.sol is not None
-        sol_fn = sol.sol
-
-        # print(sol.t[-1], ": ", sol.y[:, -1])
-
-        # for t, state in zip(sol.t, sol.y.T):
-        #     x, y, vx, vy, mass = state
-        #     elements = orbital_elements(np.array([x, y]), np.array([vx, vy]), MU)
-        #     print(
-        #         f't: {t}, apoapsis = {elements["apoapsis_radius"]}, periapsis = {elements["periapsis_radius"]}, mass = {mass}'
-        #     )
-
-        def start_burn_at(t: float) -> float:
-            print(f"***** Simulating starting the burn at {t}")
-            r, v = to_rv(sol_fn(t))
-            ret = self.circularization_burn(r, v)
-            print("Returning from start_burn_at", flush=True)
-            print(ret)
-            return ret
-
-        for t in np.linspace(0, time_to_apoapsis, 100):
-            print("Calling start_burn_at", flush=True)
-            err = start_burn_at(t)
-            print(f"Starting burn at {t}, error is {err}.", flush=True)
-
-        res = minimize_scalar(
-            start_burn_at,
-            bounds=(0, time_to_apoapsis),
-            method="bounded",
-            options={
-                "xatol": 0.01,  # Find burn start time to within xatol seconds.
-                "disp": 3,
-            },
-        )
-
-        print("**********  When to start burn  **********")
-        print(res)
-
-        r, v = to_rv(sol_fn(res.x))
-        print(f"altitude: {np.linalg.norm(r) - KERBIN_RADIUS}")
 
     @_validate
     def error(self, state: Vector) -> float:
@@ -874,12 +654,7 @@ def main() -> None:
 
         TIME_TO_APOAPSIS = 103.31401749403551
 
-        # Switch which optimization regime to experiment with here.  See the
-        # Regime class (and Regime3D / Regime4D) in sim.py to add more.
-        regime: Regime = Regime3D()
-        # regime: Regime = Regime3D()
-
-        sim.find_linear_tangent_params(R3D, V3D, TIME_TO_APOAPSIS, regime)
+        sim.find_linear_tangent_params(R3D, V3D, TIME_TO_APOAPSIS)
 
 
 if __name__ == "__main__":

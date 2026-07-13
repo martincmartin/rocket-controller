@@ -20,6 +20,12 @@ KERBIN_RADIUS = 600_000
 MU = 3.5316e12  # Kerbin
 TARGET_ALTITUDE = 80_000
 
+# Real flight state used for find_linear_tangent_params integration tests
+# (matches sim.py's main()).
+R3D = np.array([428392.15435586, -1053.61873734, -455905.93323801])
+V3D = np.array([1.03031015e03, -9.32270447e-01, -1.19588146e02])
+TIME_TO_APOAPSIS = 103.31401749403551
+
 # Swivel in vacuum:
 SWIVEL = Stage(
     "Swivel",
@@ -285,3 +291,240 @@ def test_prograde_at_apoapsis_matches_actual_velocity(sim):
     # Compare as unit vectors to avoid ±π wrapping issues
     assert math.cos(actual_angle) == pytest.approx(math.cos(predicted_angle), abs=1e-4)
     assert math.sin(actual_angle) == pytest.approx(math.sin(predicted_angle), abs=1e-4)
+
+
+# --- target_velocity tests ---
+
+
+def test_target_velocity_magnitude_and_perpendicularity(sim):
+    """Magnitude should be sqrt(mu/r), and result should be perpendicular to r,
+    regardless of the (nonzero) input velocity used to pick a direction."""
+    R = 680_000.0
+    r = vector(R, 0.0)
+    v = vector(0.0, 5000.0)  # arbitrary CCW-ish velocity
+
+    result = sim.target_velocity(r, v)
+
+    expected_speed = math.sqrt(MU / R)
+    assert np.linalg.norm(result) == pytest.approx(expected_speed, rel=1e-10)
+    assert np.dot(result, r) == pytest.approx(0.0, abs=1e-6)
+
+
+def test_target_velocity_ccw_direction():
+    """At r=(R,0) with a CCW-pointing v (+y), target velocity should point +y."""
+    sim = Simulator(MU, body_radius=KERBIN_RADIUS, target_altitude=TARGET_ALTITUDE, stages=[])
+    R = 680_000.0
+    r = vector(R, 0.0)
+    v = vector(0.0, 1.0)  # tiny CCW-pointing velocity
+
+    result = sim.target_velocity(r, v)
+
+    expected_speed = math.sqrt(MU / R)
+    np.testing.assert_allclose(result, [0.0, expected_speed], atol=1e-6)
+
+
+def test_target_velocity_cw_direction():
+    """At r=(R,0) with a CW-pointing v (-y), target velocity should point -y."""
+    sim = Simulator(MU, body_radius=KERBIN_RADIUS, target_altitude=TARGET_ALTITUDE, stages=[])
+    R = 680_000.0
+    r = vector(R, 0.0)
+    v = vector(0.0, -1.0)  # tiny CW-pointing velocity
+
+    result = sim.target_velocity(r, v)
+
+    expected_speed = math.sqrt(MU / R)
+    np.testing.assert_allclose(result, [0.0, -expected_speed], atol=1e-6)
+
+
+def test_target_velocity_rotated_position():
+    """At r=(0,R) with CCW-pointing v (-x direction, per the CCW convention
+    used elsewhere in this file: periapsis along +y, CCW velocity is -x),
+    target velocity should point in -x."""
+    sim = Simulator(MU, body_radius=KERBIN_RADIUS, target_altitude=TARGET_ALTITUDE, stages=[])
+    R = 680_000.0
+    r = vector(0.0, R)
+    v = vector(-1.0, 0.0)
+
+    result = sim.target_velocity(r, v)
+
+    expected_speed = math.sqrt(MU / R)
+    np.testing.assert_allclose(result, [-expected_speed, 0.0], atol=1e-6)
+
+
+def test_target_velocity_independent_of_input_speed_magnitude():
+    """Only the sign/direction of v should matter, not its magnitude."""
+    sim = Simulator(MU, body_radius=KERBIN_RADIUS, target_altitude=TARGET_ALTITUDE, stages=[])
+    r = vector(680_000.0, 0.0)
+
+    slow = sim.target_velocity(r, vector(0.0, 1.0))
+    fast = sim.target_velocity(r, vector(0.0, 100_000.0))
+
+    np.testing.assert_allclose(slow, fast, atol=1e-9)
+
+
+def test_target_velocity_with_radial_component_ccw():
+    """v has both a radial (+x, outward) and a CCW tangential (+y) component.
+    The radial component should be ignored; result should match the pure
+    CCW-tangential case."""
+    sim = Simulator(MU, body_radius=KERBIN_RADIUS, target_altitude=TARGET_ALTITUDE, stages=[])
+    R = 680_000.0
+    r = vector(R, 0.0)
+    v = vector(200.0, 3000.0)  # radial + CCW tangential
+
+    result = sim.target_velocity(r, v)
+
+    expected_speed = math.sqrt(MU / R)
+    np.testing.assert_allclose(result, [0.0, expected_speed], atol=1e-6)
+    assert np.dot(result, r) == pytest.approx(0.0, abs=1e-6)
+
+
+def test_target_velocity_with_radial_component_cw():
+    """v has both a radial (-x, inward) and a CW tangential (-y) component.
+    The radial component (and its sign) should not affect the result."""
+    sim = Simulator(MU, body_radius=KERBIN_RADIUS, target_altitude=TARGET_ALTITUDE, stages=[])
+    R = 680_000.0
+    r = vector(R, 0.0)
+    v = vector(-200.0, -3000.0)  # radial (inward) + CW tangential
+
+    result = sim.target_velocity(r, v)
+
+    expected_speed = math.sqrt(MU / R)
+    np.testing.assert_allclose(result, [0.0, -expected_speed], atol=1e-6)
+    assert np.dot(result, r) == pytest.approx(0.0, abs=1e-6)
+
+
+def test_target_velocity_purely_radial_input_defaults_to_ccw():
+    """Edge case: if v has zero tangential component (purely radial), the
+    flip condition (`dot < 0`) never triggers, so the implementation
+    defaults to the CCW direction.  This test documents that behavior."""
+    sim = Simulator(MU, body_radius=KERBIN_RADIUS, target_altitude=TARGET_ALTITUDE, stages=[])
+    R = 680_000.0
+    r = vector(R, 0.0)
+    v = vector(500.0, 0.0)  # purely radial, no tangential component
+
+    result = sim.target_velocity(r, v)
+
+    expected_speed = math.sqrt(MU / R)
+    np.testing.assert_allclose(result, [0.0, expected_speed], atol=1e-6)
+
+
+def test_target_velocity_arbitrary_angle_ccw():
+    """r at an arbitrary angle (not on an axis); v purely tangential CCW."""
+    sim = Simulator(MU, body_radius=KERBIN_RADIUS, target_altitude=TARGET_ALTITUDE, stages=[])
+    R = 750_000.0
+    theta = math.radians(37.0)  # arbitrary angle, not a multiple of 45
+    r = vector(R * math.cos(theta), R * math.sin(theta))
+
+    # CCW tangent direction: rotate r_hat by +90 deg.
+    tangent_ccw = vector(-math.sin(theta), math.cos(theta))
+    v = 4000.0 * tangent_ccw
+
+    result = sim.target_velocity(r, v)
+
+    expected_speed = math.sqrt(MU / R)
+    expected = expected_speed * tangent_ccw
+    np.testing.assert_allclose(result, expected, atol=1e-6)
+    assert np.dot(result, r) == pytest.approx(0.0, abs=1e-6)
+
+
+def test_target_velocity_arbitrary_angle_cw_with_radial_component():
+    """r at an arbitrary angle, in a different quadrant; v has both a
+    radial (outward) and a CW tangential component.  Result direction
+    should follow the tangential (CW) sign, ignoring the radial part."""
+    sim = Simulator(MU, body_radius=KERBIN_RADIUS, target_altitude=TARGET_ALTITUDE, stages=[])
+    R = 750_000.0
+    theta = math.radians(163.0)  # arbitrary angle, second quadrant
+    r = vector(R * math.cos(theta), R * math.sin(theta))
+    r_hat = vector(math.cos(theta), math.sin(theta))
+
+    tangent_ccw = vector(-math.sin(theta), math.cos(theta))
+    tangent_cw = -tangent_ccw
+
+    v = 500.0 * r_hat + 2500.0 * tangent_cw  # radial (outward) + CW tangential
+
+    result = sim.target_velocity(r, v)
+
+    expected_speed = math.sqrt(MU / R)
+    expected = expected_speed * tangent_cw
+    np.testing.assert_allclose(result, expected, atol=1e-6)
+    assert np.dot(result, r) == pytest.approx(0.0, abs=1e-6)
+
+
+# --- find_linear_tangent_params (SLSQP) tests ---
+
+
+def test_find_linear_tangent_params_converges(sim):
+    """End-to-end regression test using real flight data (from main()):
+    the SLSQP solve should succeed and produce a circular orbit at (or
+    just above) the target altitude, within the burn/coast time bounds.
+    """
+    res = sim.find_linear_tangent_params(R3D, V3D, TIME_TO_APOAPSIS)
+
+    assert res.success
+
+    coast_time, a_coeff, b_coeff, burn_time = res.x
+    assert -1e-6 <= coast_time <= TIME_TO_APOAPSIS + 1e-6
+    assert -1e-6 <= burn_time <= sim.total_burn_budget() + 1e-6
+
+    # Recompute the final state via the public API to check the resulting orbit.
+    r_hat, w_hat, r0, v0 = project(R3D, V3D)
+    orbit0 = orbital_elements(r0, v0, MU)
+    ref_angle = Simulator.prograde_at_apoapsis(orbit0)
+
+    sol = sim.solve_coast((0, TIME_TO_APOAPSIS), r0, v0)
+    assert sol.sol is not None
+    r_coast, v_coast = to_rv(sol.sol(coast_time))
+
+    result = sim.propagate_linear_tangent(
+        r_coast, v_coast, a_coeff, b_coeff, ref_angle, burn_time
+    )
+    final_orbit = orbital_elements(result.r, result.v, MU)
+
+    # Circular orbit: periapsis ~= apoapsis.
+    assert final_orbit.periapsis_radius == pytest.approx(
+        final_orbit.apoapsis_radius, rel=1e-3
+    )
+    # Radius at/above target (inequality constraint), and close to it (since
+    # the objective minimizes burn_time, pushing the solution toward the
+    # constraint boundary).
+    assert final_orbit.apoapsis_radius >= sim.target_radius - 10.0
+    assert final_orbit.periapsis_radius == pytest.approx(sim.target_radius, abs=50.0)
+
+
+def test_find_linear_tangent_params_memoizes_simulation(monkeypatch):
+    """No two calls to propagate_linear_tangent during a single
+    find_linear_tangent_params run should have identical arguments --
+    i.e. the memoized `simulate` helper should dedupe repeated evaluations
+    at the same optimizer point."""
+    sim = Simulator(
+        MU,
+        body_radius=KERBIN_RADIUS,
+        target_altitude=TARGET_ALTITUDE,
+        stages=[SWIVEL, TERRIER],
+    )
+
+    calls: list[tuple[float, ...]] = []
+    original = Simulator.propagate_linear_tangent
+
+    def spy(self, r, v, a_coeff, b_coeff, ref_angle, burn_time):
+        key = (
+            round(float(r[0]), 6),
+            round(float(r[1]), 6),
+            round(float(v[0]), 6),
+            round(float(v[1]), 6),
+            round(float(a_coeff), 9),
+            round(float(b_coeff), 9),
+            round(float(burn_time), 9),
+        )
+        calls.append(key)
+        return original(self, r, v, a_coeff, b_coeff, ref_angle, burn_time)
+
+    monkeypatch.setattr(Simulator, "propagate_linear_tangent", spy)
+
+    sim.find_linear_tangent_params(R3D, V3D, TIME_TO_APOAPSIS)
+
+    assert len(calls) == len(set(calls)), (
+        "propagate_linear_tangent was called more than once with identical "
+        "arguments; memoization should have deduped these."
+    )
+    assert len(calls) > 0
