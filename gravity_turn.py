@@ -602,7 +602,7 @@ def main():
     print("Connecting to kRPC server…")
     conn = krpc.connect(name="Gravity Turn")
 
-    gravity_turn(conn, 100, 25_000)
+    gravity_turn(conn, 100, 30_000)
 
     conn.close()
 
