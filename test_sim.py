@@ -9,6 +9,8 @@ import pytest
 pytestmark = pytest.mark.filterwarnings("error::RuntimeWarning")
 
 from sim import (
+    CircularizationPlan,
+    OrbitalPlane,
     Stage,
     Simulator,
     orbital_elements,
@@ -34,6 +36,7 @@ SWIVEL = Stage(
     thrust=215_000.0,  # Newtons = kg m / sec^2
     max_burn_time=46.95725973451462,
     initial_mass=13057.14453125,
+    last_segment_of_stage=True,
 )
 
 # Terrier
@@ -43,6 +46,7 @@ TERRIER = Stage(
     thrust=60_000.0,  # Newtons = kg m / sec^2, flow_rate=17.7341950083118 kg/sec
     max_burn_time=112.77647255563578,
     initial_mass=4450.0,  # 2450 mass after burn?
+    last_segment_of_stage=True,
 )
 
 
@@ -474,28 +478,27 @@ def test_target_velocity_arbitrary_angle_cw_with_radial_component():
 
 def test_find_linear_tangent_params_converges(sim):
     """End-to-end regression test using real flight data (from main()):
-    the SLSQP solve should succeed and produce a circular orbit at (or
-    just above) the target altitude, within the burn/coast time bounds.
+    the SLSQP solve should produce a circular orbit at (or just above) the
+    target altitude, within the burn-time bounds.
     """
-    res = sim.find_linear_tangent_params(R3D, V3D, TIME_TO_APOAPSIS)
+    plan = sim.find_linear_tangent_params(R3D, V3D, TIME_TO_APOAPSIS)
 
-    assert res.success
+    assert isinstance(plan, CircularizationPlan)
+    assert -1e-6 <= plan.burn_time <= sim.total_burn_budget() + 1e-6
 
-    coast_time, a_coeff, b_coeff, burn_time = res.x
-    assert -1e-6 <= coast_time <= TIME_TO_APOAPSIS + 1e-6
-    assert -1e-6 <= burn_time <= sim.total_burn_budget() + 1e-6
+    # r_hat / w_hat must be orthonormal.
+    assert np.linalg.norm(plan.plane.r_hat) == pytest.approx(1.0, abs=1e-9)
+    assert np.linalg.norm(plan.plane.w_hat) == pytest.approx(1.0, abs=1e-9)
+    assert np.dot(plan.plane.r_hat, plan.plane.w_hat) == pytest.approx(0.0, abs=1e-9)
 
-    # Recompute the final state via the public API to check the resulting orbit.
-    r_hat, w_hat, r0, v0 = project(R3D, V3D)
-    orbit0 = orbital_elements(r0, v0, MU)
-    ref_angle = Simulator.prograde_at_apoapsis(orbit0)
-
-    sol = sim.solve_coast((0, TIME_TO_APOAPSIS), r0, v0)
-    assert sol.sol is not None
-    r_coast, v_coast = to_rv(sol.sol(coast_time))
-
+    # Replay the burn through the public API to check the resulting orbit.
     result = sim.propagate_linear_tangent(
-        r_coast, v_coast, a_coeff, b_coeff, ref_angle, burn_time
+        plan.r_coast,
+        plan.v_coast,
+        plan.a_coeff,
+        plan.b_coeff,
+        plan.ref_angle,
+        plan.burn_time,
     )
     final_orbit = orbital_elements(result.r, result.v, MU)
 
@@ -587,6 +590,54 @@ def test_total_burn_budget_single_stage_no_staging():
     assert single_stage_sim.total_burn_budget() == pytest.approx(SWIVEL.max_burn_time)
 
 
+def test_total_burn_budget_no_staging_coast_when_not_last_segment_of_stage():
+    """No 1 second staging coast should be added after a stage whose
+    last_segment_of_stage is False, since no real part separation happens
+    there -- the next segment continues immediately."""
+    stage_a = Stage(
+        "A",
+        ve=SWIVEL.ve,
+        thrust=SWIVEL.thrust,
+        max_burn_time=10.0,
+        initial_mass=1000.0,
+        last_segment_of_stage=False,
+    )
+    stage_b = Stage(
+        "B",
+        ve=TERRIER.ve,
+        thrust=TERRIER.thrust,
+        max_burn_time=20.0,
+        initial_mass=900.0,
+        last_segment_of_stage=True,
+    )
+
+    no_coast_sim = Simulator(
+        MU,
+        body_radius=KERBIN_RADIUS,
+        target_altitude=TARGET_ALTITUDE,
+        stages=[stage_a, stage_b],
+    )
+    assert no_coast_sim.total_burn_budget() == pytest.approx(30.0)
+
+    with_coast_sim = Simulator(
+        MU,
+        body_radius=KERBIN_RADIUS,
+        target_altitude=TARGET_ALTITUDE,
+        stages=[
+            Stage(
+                "A",
+                ve=stage_a.ve,
+                thrust=stage_a.thrust,
+                max_burn_time=stage_a.max_burn_time,
+                initial_mass=stage_a.initial_mass,
+                last_segment_of_stage=True,
+            ),
+            stage_b,
+        ],
+    )
+    assert with_coast_sim.total_burn_budget() == pytest.approx(31.0)
+
+
 def test_propagate_linear_tangent_burn_time_includes_staging_seconds(sim):
     """burn_time should include the 1 second staging coast, so the second
     stage should only burn for `burn_time - stage1.max_burn_time - 1.0`
@@ -647,3 +698,101 @@ def test_propagate_linear_tangent_continuous_time_across_stages(sim, monkeypatch
     sim.propagate_linear_tangent(r0, v0, 0.0, 0.0, 0.0, burn_time)
 
     assert t_offsets == [pytest.approx(0.0), pytest.approx(SWIVEL.max_burn_time + 1.0)]
+
+
+def test_propagate_linear_tangent_no_staging_coast_when_not_last_segment_of_stage(
+    monkeypatch,
+):
+    """When a stage's last_segment_of_stage is False, propagate_linear_tangent
+    should transition straight into the next stage with no 1 second staging
+    coast: the next stage's solve_linear_tangent call should start at the
+    same t_offset the previous stage ended at (no +1.0)."""
+    r_hat, w_hat, r0, v0 = project(R3D, V3D)
+
+    stage_a = Stage(
+        "A",
+        ve=SWIVEL.ve,
+        thrust=SWIVEL.thrust,
+        max_burn_time=SWIVEL.max_burn_time,
+        initial_mass=SWIVEL.initial_mass,
+        last_segment_of_stage=False,
+    )
+    stage_b = Stage(
+        "B",
+        ve=TERRIER.ve,
+        thrust=TERRIER.thrust,
+        max_burn_time=TERRIER.max_burn_time,
+        initial_mass=TERRIER.initial_mass,
+        last_segment_of_stage=True,
+    )
+    no_coast_sim = Simulator(
+        MU,
+        body_radius=KERBIN_RADIUS,
+        target_altitude=TARGET_ALTITUDE,
+        stages=[stage_a, stage_b],
+    )
+
+    t_offsets: list[float] = []
+    original = Simulator.solve_linear_tangent
+
+    def spy(self, t_offset, duration, r, v, stage, a_coeff, b_coeff, ref_angle):
+        t_offsets.append(t_offset)
+        return original(
+            self, t_offset, duration, r, v, stage, a_coeff, b_coeff, ref_angle
+        )
+
+    monkeypatch.setattr(Simulator, "solve_linear_tangent", spy)
+
+    burn_time = stage_a.max_burn_time + 10.0
+    no_coast_sim.propagate_linear_tangent(r0, v0, 0.0, 0.0, 0.0, burn_time)
+
+    assert t_offsets == [pytest.approx(0.0), pytest.approx(stage_a.max_burn_time)]
+
+
+# --- OrbitalPlane tests ---
+
+
+def test_orbital_plane_to_plane_from_plane_roundtrip():
+    r_hat, w_hat, _, _ = project(R3D, V3D)
+    plane = OrbitalPlane(r_hat, w_hat)
+
+    v2d = vector(123.4, -567.8)
+    v3d = plane.from_plane(v2d)
+
+    np.testing.assert_allclose(plane.to_plane(v3d), v2d, atol=1e-6)
+
+
+def test_orbital_plane_to_angle_3d_matches_2d():
+    r_hat, w_hat, _, _ = project(R3D, V3D)
+    plane = OrbitalPlane(r_hat, w_hat)
+
+    v2d = vector(1.0, 1.0)
+    v3d = plane.from_plane(v2d)
+
+    assert plane.to_angle(v3d) == pytest.approx(plane.to_angle(v2d))
+    assert plane.to_angle(v2d) == pytest.approx(math.pi / 4)
+
+
+def test_orbital_plane_to_angle_wraps_negative_to_positive():
+    r_hat, w_hat, _, _ = project(R3D, V3D)
+    plane = OrbitalPlane(r_hat, w_hat)
+
+    v2d = vector(1.0, -1.0)  # atan2 -> -pi/4
+    angle = plane.to_angle(v2d)
+
+    assert 0.0 <= angle < 2 * math.pi
+    assert angle == pytest.approx(2 * math.pi - math.pi / 4)
+
+
+def test_orbital_plane_to_angle_zero_at_r_hat():
+    """By construction of project(), the position vector used to build
+    r_hat/w_hat lies entirely along r_hat, i.e. at angle ~0 (mod 2*pi;
+    floating-point noise in the (near-zero) w_hat component can push the
+    raw atan2 result to either side of 0, which to_angle then wraps to
+    just under 2*pi instead of just above 0)."""
+    r_hat, w_hat, r0, v0 = project(R3D, V3D)
+    plane = OrbitalPlane(r_hat, w_hat)
+
+    for angle in (plane.to_angle(R3D), plane.to_angle(r0)):
+        wrapped = min(angle, 2 * math.pi - angle)
+        assert wrapped == pytest.approx(0.0, abs=1e-9)

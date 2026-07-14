@@ -17,7 +17,7 @@ Vector = NDArray[np.float64]
 from pydantic import ConfigDict, validate_call
 from scipy.integrate import solve_ivp
 from scipy.integrate._ivp.ivp import OdeResult
-from scipy.optimize import NonlinearConstraint, OptimizeResult, minimize
+from scipy.optimize import NonlinearConstraint, minimize
 
 _validate = validate_call(config=ConfigDict(arbitrary_types_allowed=True))
 
@@ -147,6 +147,11 @@ class Stage:
     thrust: float
     max_burn_time: float
     initial_mass: float
+    # True if a real decouple/staging event (modeled as a 1 second coast)
+    # follows this stage before the next one begins. False if the next
+    # stage begins immediately (e.g. one engine group in a multi-group
+    # segment ran dry while another continues, with no part separation).
+    last_segment_of_stage: bool
 
 
 @dataclass
@@ -169,6 +174,53 @@ class BurnResult:
     r: Vector
     v: Vector
     mass: float
+
+
+@dataclass
+class OrbitalPlane:
+    """A fixed 2D plane within 3D space, spanned by orthonormal unit vectors
+    r_hat (radial direction) and w_hat (in-plane tangential direction),
+    used to represent in-plane orbital motion as 2D vectors."""
+
+    r_hat: Vector
+    w_hat: Vector
+
+    @_validate
+    def to_plane(self, v3d: Vector) -> Vector:
+        """Project a 3D vector onto this plane, returning its 2D
+        (r_hat, w_hat) coordinates."""
+        return np.array([np.dot(v3d, self.r_hat), np.dot(v3d, self.w_hat)])
+
+    @_validate
+    def from_plane(self, v2d: Vector) -> Vector:
+        """Expand a 2D (r_hat, w_hat) vector back into 3D."""
+        return cast(Vector, v2d[0] * self.r_hat + v2d[1] * self.w_hat)
+
+    @_validate
+    def to_angle(self, v: Vector) -> float:
+        """Return the polar angle (radians, in [0, 2*pi)) of `v` within this
+        plane. `v` may be a 3D vector (projected via `to_plane` first) or an
+        already-2D vector (e.g. the output of `to_plane`)."""
+        if v.shape[0] == 3:
+            v = self.to_plane(v)
+        angle = math.atan2(v[1], v[0])
+        if angle < 0:
+            angle += 2 * math.pi
+        return angle
+
+
+@dataclass
+class CircularizationPlan:
+    """Everything needed to execute a planned linear-tangent
+    circularization burn."""
+
+    plane: OrbitalPlane  # orbital-plane basis (r_hat, w_hat) at planning time
+    r_coast: Vector  # 2D position (plane coords) at coast_time (burn start)
+    v_coast: Vector  # 2D velocity (plane coords) at coast_time (burn start)
+    a_coeff: float
+    b_coeff: float
+    burn_time: float
+    ref_angle: float
 
 
 def cross2d(r: Vector, v: Vector) -> float:
@@ -400,10 +452,17 @@ class Simulator:
     @_validate
     def total_burn_budget(self) -> float:
         """Total elapsed time available across all remaining stages,
-        including the mandatory 1 second staging coast between each pair of
-        stages."""
+        including a 1 second staging coast after each stage whose
+        `last_segment_of_stage` is True (except the last stage, which has
+        no following stage to coast into)."""
         n = len(self.stages)
-        return sum(stage.max_burn_time for stage in self.stages) + max(0, n - 1) * 1.0
+        total = sum(stage.max_burn_time for stage in self.stages)
+        total += sum(
+            1.0
+            for i, stage in enumerate(self.stages)
+            if stage.last_segment_of_stage and i < n - 1
+        )
+        return total
 
     @_validate
     def burn_time_for_delta_v(self, delta_v: float) -> float:
@@ -434,7 +493,7 @@ class Simulator:
             remaining_dv -= stage_dv
             elapsed += stage.max_burn_time
 
-            if i < n_stages - 1:
+            if stage.last_segment_of_stage and i < n_stages - 1:
                 elapsed += 1.0
 
         # Ran out of stages before delivering the requested delta-v; fall
@@ -492,7 +551,7 @@ class Simulator:
             # Cast needed because y is type ndarray[float64 | complex128]
             r, v, mass = to_rvm(cast(Vector, solution.y[:, -1]))
 
-            if i < n_stages - 1:
+            if stage.last_segment_of_stage and i < n_stages - 1:
                 # Simulate staging as a 1 second coast, which also counts
                 # against the requested burn_time budget. Clamp to
                 # `remaining` in case the deadline falls inside this window.
@@ -563,7 +622,7 @@ class Simulator:
         r3d: Vector,
         v3d: Vector,
         time_to_apoapsis: float,
-    ) -> OptimizeResult:
+    ) -> CircularizationPlan:
         """Find linear-tangent steering parameters (coast_time, a_coeff,
         b_coeff, burn_time) that circularize the orbit, using SLSQP with
         explicit constraints:
@@ -683,7 +742,18 @@ class Simulator:
         print(f"Radius residual:     {ineq_residual[0]:8.2f} m")
         print(f"Optimizer success:   {res.success} ({res.message})")
         print(timer.summary())
-        return res
+
+        r_coast, v_coast = to_rv(coast_fn(coast_time))
+
+        return CircularizationPlan(
+            plane=OrbitalPlane(r_hat, w_hat),
+            r_coast=r_coast,
+            v_coast=v_coast,
+            a_coeff=float(a_coeff),
+            b_coeff=float(b_coeff),
+            burn_time=float(burn_time),
+            ref_angle=float(ref_angle),
+        )
 
 
 def main() -> None:
@@ -697,6 +767,7 @@ def main() -> None:
             thrust=215_000.0,  # Newtons = kg m / sec^2
             max_burn_time=46.95725973451462,
             initial_mass=13057.14453125,
+            last_segment_of_stage=True,
         )
 
         # Terrier
@@ -706,6 +777,7 @@ def main() -> None:
             thrust=60_000.0,  # Newtons = kg m / sec^2, flow_rate=17.7341950083118 kg/sec
             max_burn_time=112.77647255563578,
             initial_mass=4450.0,  # 2450 mass after burn?
+            last_segment_of_stage=True,
         )
 
         MU = 3.5316e12

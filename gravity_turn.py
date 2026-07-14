@@ -6,11 +6,13 @@ Performs an automated launch from the pad through gravity turn and into
 a circular orbit at the specified target altitude.
 
 Phases:
-  1. Vertical ascent
-  2. Gravity turn (smooth pitch-over as a function of altitude)
-  3. Coast to target apoapsis with throttle tapering
-  4. Coast to apoapsis for circularization
-  5. Circularization burn via maneuver node
+  1. Vertical ascent & gravity turn (smooth pitch-over as a function of
+     altitude), with throttle tapering as apoapsis nears target
+  2. Plan the circularization burn (linear-tangent steering law) via
+     sim.Simulator.find_linear_tangent_params
+  3. Coast to the planned burn-start angle
+  4. Circularization burn, steering per the linear-tangent law, until
+     eccentricity bottoms out (apoapsis == periapsis)
 
 Usage:
   1. Place your rocket on the launch pad in KSP
@@ -25,6 +27,8 @@ import time
 import krpc
 import numpy as np
 from collections import namedtuple
+
+from sim import CircularizationPlan, Simulator, Stage
 
 # Standard gravitational acceleration (m/s²), used for Isp ↔ exhaust velocity.
 G0 = 9.80665
@@ -61,9 +65,10 @@ def clamp(value: float, lo: float, hi: float) -> float:
 class EngineGroup:
     """Snapshot of an engine group's performance and remaining fuel."""
 
-    __slots__ = ("thrust", "flow_rate", "fuel_duration")
+    __slots__ = ("name", "thrust", "flow_rate", "fuel_duration")
 
-    def __init__(self, thrust, flow_rate, fuel_duration):
+    def __init__(self, name, thrust, flow_rate, fuel_duration):
+        self.name = name  # representative engine's part.title
         self.thrust = thrust  # N
         self.flow_rate = flow_rate  # kg/s
         self.fuel_duration = fuel_duration  # seconds until limiting propellant depletes
@@ -128,7 +133,7 @@ def _engine_group_stats(engines):
         return None
 
     print(f"{rep.part.title}: {thrust=}, {flow_rate=}, {fuel_dur=}")
-    return EngineGroup(thrust, flow_rate, fuel_dur)
+    return EngineGroup(rep.part.title, thrust, flow_rate, fuel_dur)
 
 
 def _discover_engine_groups(vessel, active_only=True, stage_filter=None):
@@ -164,8 +169,9 @@ def _discover_engine_groups(vessel, active_only=True, stage_filter=None):
     return groups
 
 
-def burn_time(vessel, delta_v: float) -> float:
-    """Estimate burn duration for *delta_v* m/s.
+def build_stages(vessel) -> list[Stage]:
+    """Build the list of sim.Stage segments describing the vessel's
+    remaining engine/fuel state, for use with Simulator.
 
     Accounts for:
     * **Multiple engine groups** — engines with separate fuel supplies that
@@ -176,14 +182,19 @@ def burn_time(vessel, delta_v: float) -> float:
     Engine groups are identified by the heuristic key
     ``(decouple_stage, frozenset(propellant_names))``.
 
-    The burn is simulated as a sequence of *segments*.  Each segment has a
-    constant set of active engine groups (and therefore constant total
-    thrust and combined Isp).  A segment ends when the first group runs
-    out of fuel, at which point that group is removed and a new segment
-    begins with the remaining groups.
+    The vessel's remaining burn is walked as a sequence of *segments*, each
+    with a constant set of active engine groups (and therefore constant
+    total thrust and combined Isp), becoming one ``Stage`` each. A segment
+    ends either when the first engine group within it runs dry while
+    others still have fuel left (no part separation happens, so the next
+    segment's ``Stage.last_segment_of_stage`` is ``False`` and it begins
+    immediately with the remaining group(s)), or when all currently active
+    engine groups are spent simultaneously and staging is required to
+    reach the next group of engines (``last_segment_of_stage=True``,
+    modeled elsewhere as a 1 second coast before the next stage).
     """
-    remaining_dv = delta_v
-    total_time = 0.0
+    stages: list[Stage] = []
+
     m = vessel.mass  # kg
     current_stage = vessel.control.current_stage
     print(f"Initial mass: {m} at stage: {current_stage}")
@@ -193,9 +204,6 @@ def burn_time(vessel, delta_v: float) -> float:
 
     max_iterations = 50  # safety limit
     for _ in range(max_iterations):
-        if remaining_dv <= 0:
-            break
-
         # ── If no groups, try to simulate the next staging event ─────
         if not groups:
             found = False
@@ -243,32 +251,38 @@ def burn_time(vessel, delta_v: float) -> float:
         if total_flow <= 0 or F_total <= 0:
             break
         ve = F_total / total_flow
+        name = " + ".join(g.name for g in groups)
 
-        # Δv available in this segment (Tsiolkovsky).
+        # If any engine group in this segment still has fuel left after
+        # min_dur, the next segment continues immediately with those
+        # groups (same hardware stage, no decoupling event).
+        remaining_after = [g for g in groups if g.fuel_duration > min_dur + 0.001]
+        last_segment_of_stage = not remaining_after
+
+        stages.append(
+            Stage(
+                name=name,
+                ve=ve,
+                thrust=F_total,
+                max_burn_time=min_dur,
+                initial_mass=m,
+                last_segment_of_stage=last_segment_of_stage,
+            )
+        )
+
         mass_consumed = total_flow * min_dur
         print(f"mass consumed: {mass_consumed}")
         if mass_consumed >= m:
             print(f"!!! WTF????")
             break
-        dv_segment = ve * math.log(m / (m - mass_consumed))
+        m -= mass_consumed
+        print(f"Mass after burn: {m}")
 
-        if dv_segment >= remaining_dv:
-            # We finish the burn inside this segment.
-            m_after = m * math.exp(-remaining_dv / ve)
-            t = (m - m_after) / total_flow
-            total_time += t
-            remaining_dv = 0
-        else:
-            # Entire segment is consumed — remove the depleted group.
-            total_time += min_dur
-            remaining_dv -= dv_segment
-            m -= mass_consumed
-            print(f"Mass after burn: {m}")
-            groups = [g for g in groups if g.fuel_duration > min_dur + 0.001]
-            for g in groups:
-                g.fuel_duration -= min_dur
+        groups = remaining_after
+        for g in groups:
+            g.fuel_duration -= min_dur
 
-    return total_time
+    return stages
 
 
 def print_telemetry(
@@ -292,51 +306,27 @@ def resource_mass(vessel):
     return sum(r.amount * r.density for r in vessel.resources.all)
 
 
-def plan_circularization(vessel):
+def plan_circularization(vessel, target_altitude: float) -> CircularizationPlan:
+    """Plan a linear-tangent-steering circularization burn for *vessel*,
+    targeting a circular orbit at *target_altitude* meters."""
     body = vessel.orbit.body
     frame = body.non_rotating_reference_frame
 
-    # Position (m)
+    # Position (m) and velocity (m/s), non-rotating reference frame.
     r3d = np.array(vessel.position(frame))
-
-    # Velocity (m/s)
     v3d = np.array(vessel.velocity(frame))
+    mu = body.gravitational_parameter
+    body_radius = body.equatorial_radius
+    time_to_apoapsis = vessel.orbit.time_to_apoapsis
 
     print(
-        f"{r3d=}, {v3d=}, {vessel.mass=}, mu = {body.gravitational_parameter}, time to apopasis={vessel.orbit.time_to_apoapsis}"
+        f"{r3d=}, {v3d=}, {vessel.mass=}, mu={mu}, time to apoapsis={time_to_apoapsis}"
     )
 
-    # Reduce to 2D in the orbital plane.  r_hat will be our new x axis, w_hat
-    # our new y.
+    stages = build_stages(vessel)
+    sim = Simulator(mu, body_radius, target_altitude, stages)
 
-    # r_hat, w_hat, r, v = project(r3d, v3d)
-
-    # mu = body.gravitational_parameter
-    # m0 = vessel.mass
-
-
-"""
-To plan circularization burn, consider using solve_ivp function from the SciPy library
-with the 4 systems of equations:
-
-d^2 r_ / d t^2 =−μ/r^3 ​r_ + (m0 - T​/ve t) v_hat
-where r_ and v_ are 2D vectors, and v_ = d r_ / d t
-
-Could use scipy.optimize.minimize_scalar to then find the best time to start the burn.
-
-"For spacecraft dynamics, solve_ivp with the "DOP853" method (high accuracy,
-non-stiff) is often an excellent choice:"
-
-For when to start the burn, choose instead the universal variable, and determine
-time, x_vec and v_vec from that.  https://en.wikipedia.org/wiki/Universal_variable_formulation
-and Bate, Mueller & Whites Fundamentals of Astrodynamics section 4.3.  Or, during
-the integration, in the timestep where the thrust is turned on, just assume the thrust
-is proportional to the % time on?  In other words, if youre doing full thrust for 60%
-of the time step, assume 60% thrust for the whole time step?  Would be a lot easier
-and probably close enough...
-
-Could also consider poliastro: https://docs.poliastro.space/en/stable/
-"""
+    return sim.find_linear_tangent_params(r3d, v3d, time_to_apoapsis)
 
 
 # Main gravity turn implementation.
@@ -373,6 +363,7 @@ def gravity_turn(conn, turn_start_alt, turn_end_alt):
     altitude = conn.add_stream(getattr, vessel.flight(), "mean_altitude")
     apoapsis = conn.add_stream(getattr, vessel.orbit, "apoapsis_altitude")
     periapsis = conn.add_stream(getattr, vessel.orbit, "periapsis_altitude")
+    eccentricity = conn.add_stream(getattr, vessel.orbit, "eccentricity")
     speed = conn.add_stream(
         getattr, vessel.flight(vessel.orbit.body.reference_frame), "speed"
     )
@@ -435,7 +426,6 @@ def gravity_turn(conn, turn_start_alt, turn_end_alt):
         vessel.control.throttle = throttle
 
         if ap > ENGINE_CUTOFF_ALTITUDE * AP_WARP_MARGIN:
-            print("Turning off warp!")
             conn.space_center.physics_warp_factor = 0  # 1× physics warp when close.
 
         # ── Auto-staging (fuel depletion check) ─────────────────────────
@@ -471,64 +461,48 @@ def gravity_turn(conn, turn_start_alt, turn_end_alt):
         time.sleep(0.1)
 
     # ═══════════════════════════════════════════════════════════════════════
-    #  PHASE 2 — Coast to Apoapsis & Circularization Burn
+    #  PHASE 2 — Planning Circularization Burn
     # ═══════════════════════════════════════════════════════════════════════
     print("\n── Phase 2: Planning Circularization Burn ──")
 
-    plan_circularization(vessel)
+    plan = plan_circularization(vessel, TARGET_ALTITUDE)
+    frame = body.non_rotating_reference_frame
+    target_angle = plan.plane.to_angle(plan.r_coast)
 
-    # This should be a helper function.
-    # Calculate the required Δv to raise periapsis to desired value.
-    r_target = body_radius + TARGET_ALTITUDE
-    r_apoapsis = body_radius + apoapsis()
-    v_now = math.sqrt(mu * (2 / r_apoapsis - 1 / vessel.orbit.semi_major_axis))
-    v_goal = math.sqrt(mu * (2 / r_apoapsis - 2 / (r_target + r_apoapsis)))
+    # ═══════════════════════════════════════════════════════════════════════
+    #  PHASE 3 — Coast to Burn-Start Angle
+    # ═══════════════════════════════════════════════════════════════════════
+    print("\n── Phase 3: Coasting to Burn Start Angle ──")
 
-    delta_v = v_goal - v_now
-    print(f"  Δv for circularization: {delta_v:.1f} m/s")
-
-    # Compute burn time
-    burn_dur = burn_time(vessel, delta_v)
-    print(f"  Estimated burn time:    {burn_dur:.1f} s")
-
-    # Add a maneuver node at apoapsis
-    node = vessel.control.add_node(
-        ut() + vessel.orbit.time_to_apoapsis,
-        prograde=delta_v,
-    )
-    print(f"  Maneuver node placed at T+{vessel.orbit.time_to_apoapsis:.0f} s")
-
-    # Point prograde for coast and circularization burn
-    vessel.auto_pilot.reference_frame = vessel.orbital_reference_frame
-    vessel.auto_pilot.target_direction = (0, 1, 0)  # prograde in orbital frame
+    vessel.auto_pilot.reference_frame = frame
     vessel.auto_pilot.stopping_time = (
         2,
         2,
         2,
     )  # gentler corrections to avoid oscillation
 
-    # Wait until pointing within 5° (auto_pilot.wait() demands too-tight tolerance)
-    alignment_timeout = 60  # seconds
-    t0 = time.time()
-    while time.time() - t0 < alignment_timeout:
-        if vessel.auto_pilot.error < 5.0:
+    while True:
+        pos = np.array(vessel.position(frame))
+        current_angle = plan.plane.to_angle(pos)
+
+        # Point toward the burn's initial attitude while coasting, so the
+        # craft has time to rotate into position before ignition.
+        theta0 = plan.ref_angle + math.atan(plan.a_coeff)
+        initial_dir = plan.plane.from_plane(
+            np.array([math.cos(theta0), math.sin(theta0)])
+        )
+        vessel.auto_pilot.target_direction = tuple(initial_dir)
+
+        if current_angle >= target_angle:
             break
-        time.sleep(0.25)
-    print(f"  Autopilot aligned to prograde (error: {vessel.auto_pilot.error:.1f}°)")
 
-    # ── Wait until burn start (lead by half the burn duration) ──────────
-    print("\n── Phase 3: Coasting to Burn Start ──")
-    burn_ut = ut() + vessel.orbit.time_to_apoapsis - (burn_dur / 2.0)
-
-    # Fine wait
-    while ut() < burn_ut:
-        time_remaining = burn_ut - ut()
         print(
-            f"\r  Burn in {time_remaining:>6.1f} s, apopasis={apoapsis()}, mass={vessel.mass}   ",
+            f"\r  Angle {math.degrees(current_angle):>7.2f}° / "
+            f"{math.degrees(target_angle):>7.2f}°, Ap {apoapsis():>8.0f} m   ",
             end="",
             flush=True,
         )
-        time.sleep(0.1)
+        time.sleep(0.05)
     print()
 
     # ═══════════════════════════════════════════════════════════════════════
@@ -537,17 +511,16 @@ def gravity_turn(conn, turn_start_alt, turn_end_alt):
     conn.space_center.physics_warp_factor = 0  # back to 1× for the burn
     print("\n── Phase 4: Circularization Burn ──")
     vessel.control.throttle = 1.0
-
-    # Burn until periapsis reaches the target altitude
-    prev_pe = periapsis()
+    burn_start_ut = ut()
+    prev_ecc = eccentricity()
+    ECC_TOLERANCE = 0.0005  # "circular enough" eccentricity to stop the burn
+    BURN_TIME_SAFETY_MARGIN = 1.5  # abort if we run this much past the plan
 
     while True:
-        pe = periapsis()
-
-        # Throttle down as periapsis approaches the target for precision
-        pe_remaining = TARGET_ALTITUDE - pe
-        if pe_remaining < 2000:
-            vessel.control.throttle = clamp(pe_remaining / 2000.0, 0.02, 1.0)
+        t = ut() - burn_start_ut
+        theta = plan.ref_angle + math.atan(plan.a_coeff + plan.b_coeff * t)
+        thrust_dir = plan.plane.from_plane(np.array([math.cos(theta), math.sin(theta)]))
+        vessel.auto_pilot.target_direction = tuple(thrust_dir)
 
         # Auto-staging during burn
         if vessel.available_thrust == 0 and vessel.control.current_stage > 0:
@@ -562,23 +535,28 @@ def gravity_turn(conn, turn_start_alt, turn_end_alt):
                 time.sleep(0.3)
             vessel.control.throttle = 1.0
 
-        # Stop when periapsis reaches (or overshoots) the target
-        if pe >= TARGET_ALTITUDE * 0.99:
-            break
-        # Stop if periapsis starts dropping (we've passed apoapsis)
-        if pe < prev_pe - 100 and pe > TARGET_ALTITUDE * 0.5:
-            break
-
-        prev_pe = pe
-        print(
-            f"\r  Periapsis: {pe:>10,.0f} m  (target: {TARGET_ALTITUDE:,} m), mass: {vessel.mass}   ",
-            end="",
-            flush=True,
+        ecc = eccentricity()
+        print_telemetry(
+            altitude(),
+            apoapsis(),
+            periapsis(),
+            math.degrees(theta),
+            vessel.control.throttle,
+            speed(),
+            "Circularizing",
         )
+
+        # Stop once eccentricity bottoms out (apsides equal) or just starts
+        # rising again (we've overshot the minimum).
+        if ecc <= ECC_TOLERANCE or ecc > prev_ecc:
+            break
+        if t > plan.burn_time * BURN_TIME_SAFETY_MARGIN:
+            print("\n  ⚠ Burn exceeded planned duration; stopping.")
+            break
+        prev_ecc = ecc
         time.sleep(0.05)
 
     vessel.control.throttle = 0.0
-    node.remove()
     print(f"\n  ✓ Circularization complete!")
 
     # ── Final Orbit Summary ─────────────────────────────────────────────
@@ -613,7 +591,7 @@ def main():
     print("Connecting to kRPC server…")
     conn = krpc.connect(name="Gravity Turn")
 
-    gravity_turn(conn, 100, 15_000)
+    gravity_turn(conn, 100, 25_000)
 
     conn.close()
 
