@@ -60,6 +60,7 @@ def sim():
         body_radius=KERBIN_RADIUS,
         target_altitude=TARGET_ALTITUDE,
         segments=[SWIVEL, TERRIER],
+        staging_duration=1.0,
     )
 
 
@@ -319,7 +320,11 @@ def test_target_velocity_magnitude_and_perpendicularity(sim):
 def test_target_velocity_ccw_direction():
     """At r=(R,0) with a CCW-pointing v (+y), target velocity should point +y."""
     sim = Simulator(
-        MU, body_radius=KERBIN_RADIUS, target_altitude=TARGET_ALTITUDE, segments=[]
+        MU,
+        body_radius=KERBIN_RADIUS,
+        target_altitude=TARGET_ALTITUDE,
+        segments=[],
+        staging_duration=1.0,
     )
     R = 680_000.0
     r = vector(R, 0.0)
@@ -334,7 +339,11 @@ def test_target_velocity_ccw_direction():
 def test_target_velocity_cw_direction():
     """At r=(R,0) with a CW-pointing v (-y), target velocity should point -y."""
     sim = Simulator(
-        MU, body_radius=KERBIN_RADIUS, target_altitude=TARGET_ALTITUDE, segments=[]
+        MU,
+        body_radius=KERBIN_RADIUS,
+        target_altitude=TARGET_ALTITUDE,
+        segments=[],
+        staging_duration=1.0,
     )
     R = 680_000.0
     r = vector(R, 0.0)
@@ -351,7 +360,11 @@ def test_target_velocity_rotated_position():
     used elsewhere in this file: periapsis along +y, CCW velocity is -x),
     target velocity should point in -x."""
     sim = Simulator(
-        MU, body_radius=KERBIN_RADIUS, target_altitude=TARGET_ALTITUDE, segments=[]
+        MU,
+        body_radius=KERBIN_RADIUS,
+        target_altitude=TARGET_ALTITUDE,
+        segments=[],
+        staging_duration=1.0,
     )
     R = 680_000.0
     r = vector(0.0, R)
@@ -366,7 +379,11 @@ def test_target_velocity_rotated_position():
 def test_target_velocity_independent_of_input_speed_magnitude():
     """Only the sign/direction of v should matter, not its magnitude."""
     sim = Simulator(
-        MU, body_radius=KERBIN_RADIUS, target_altitude=TARGET_ALTITUDE, segments=[]
+        MU,
+        body_radius=KERBIN_RADIUS,
+        target_altitude=TARGET_ALTITUDE,
+        segments=[],
+        staging_duration=1.0,
     )
     r = vector(680_000.0, 0.0)
 
@@ -381,7 +398,11 @@ def test_target_velocity_with_radial_component_ccw():
     The radial component should be ignored; result should match the pure
     CCW-tangential case."""
     sim = Simulator(
-        MU, body_radius=KERBIN_RADIUS, target_altitude=TARGET_ALTITUDE, segments=[]
+        MU,
+        body_radius=KERBIN_RADIUS,
+        target_altitude=TARGET_ALTITUDE,
+        segments=[],
+        staging_duration=1.0,
     )
     R = 680_000.0
     r = vector(R, 0.0)
@@ -398,7 +419,11 @@ def test_target_velocity_with_radial_component_cw():
     """v has both a radial (-x, inward) and a CW tangential (-y) component.
     The radial component (and its sign) should not affect the result."""
     sim = Simulator(
-        MU, body_radius=KERBIN_RADIUS, target_altitude=TARGET_ALTITUDE, segments=[]
+        MU,
+        body_radius=KERBIN_RADIUS,
+        target_altitude=TARGET_ALTITUDE,
+        segments=[],
+        staging_duration=1.0,
     )
     R = 680_000.0
     r = vector(R, 0.0)
@@ -416,7 +441,11 @@ def test_target_velocity_purely_radial_input_defaults_to_ccw():
     flip condition (`dot < 0`) never triggers, so the implementation
     defaults to the CCW direction.  This test documents that behavior."""
     sim = Simulator(
-        MU, body_radius=KERBIN_RADIUS, target_altitude=TARGET_ALTITUDE, segments=[]
+        MU,
+        body_radius=KERBIN_RADIUS,
+        target_altitude=TARGET_ALTITUDE,
+        segments=[],
+        staging_duration=1.0,
     )
     R = 680_000.0
     r = vector(R, 0.0)
@@ -431,7 +460,11 @@ def test_target_velocity_purely_radial_input_defaults_to_ccw():
 def test_target_velocity_arbitrary_angle_ccw():
     """r at an arbitrary angle (not on an axis); v purely tangential CCW."""
     sim = Simulator(
-        MU, body_radius=KERBIN_RADIUS, target_altitude=TARGET_ALTITUDE, segments=[]
+        MU,
+        body_radius=KERBIN_RADIUS,
+        target_altitude=TARGET_ALTITUDE,
+        segments=[],
+        staging_duration=1.0,
     )
     R = 750_000.0
     theta = math.radians(37.0)  # arbitrary angle, not a multiple of 45
@@ -454,7 +487,11 @@ def test_target_velocity_arbitrary_angle_cw_with_radial_component():
     radial (outward) and a CW tangential component.  Result direction
     should follow the tangential (CW) sign, ignoring the radial part."""
     sim = Simulator(
-        MU, body_radius=KERBIN_RADIUS, target_altitude=TARGET_ALTITUDE, segments=[]
+        MU,
+        body_radius=KERBIN_RADIUS,
+        target_altitude=TARGET_ALTITUDE,
+        segments=[],
+        staging_duration=1.0,
     )
     R = 750_000.0
     theta = math.radians(163.0)  # arbitrary angle, second quadrant
@@ -524,6 +561,7 @@ def test_find_linear_tangent_params_memoizes_simulation(monkeypatch):
         body_radius=KERBIN_RADIUS,
         target_altitude=TARGET_ALTITUDE,
         segments=[SWIVEL, TERRIER],
+        staging_duration=1.0,
     )
 
     calls: list[tuple[float, ...]] = []
@@ -592,6 +630,7 @@ def test_total_burn_budget_single_segment_no_staging_coast():
         body_radius=KERBIN_RADIUS,
         target_altitude=TARGET_ALTITUDE,
         segments=[SWIVEL],
+        staging_duration=1.0,
     )
     assert single_segment_sim.total_burn_budget() == pytest.approx(SWIVEL.max_burn_time)
 
@@ -622,6 +661,7 @@ def test_total_burn_budget_no_staging_coast_when_not_last_segment_of_stage():
         body_radius=KERBIN_RADIUS,
         target_altitude=TARGET_ALTITUDE,
         segments=[segment_a, segment_b],
+        staging_duration=1.0,
     )
     assert no_coast_sim.total_burn_budget() == pytest.approx(30.0)
 
@@ -640,6 +680,7 @@ def test_total_burn_budget_no_staging_coast_when_not_last_segment_of_stage():
             ),
             segment_b,
         ],
+        staging_duration=1.0,
     )
     assert with_coast_sim.total_burn_budget() == pytest.approx(31.0)
 
@@ -744,6 +785,7 @@ def test_propagate_linear_tangent_no_staging_coast_when_not_last_segment_of_stag
         body_radius=KERBIN_RADIUS,
         target_altitude=TARGET_ALTITUDE,
         segments=[segment_a, segment_b],
+        staging_duration=1.0,
     )
 
     t_offsets: list[float] = []

@@ -301,6 +301,9 @@ def resource_mass(vessel):
     return sum(r.amount * r.density for r in vessel.resources.all)
 
 
+STAGING_DURATION = 2.5  # seconds; measured real-world KSP staging delay
+
+
 def plan_circularization(vessel, target_altitude: float) -> CircularizationPlan:
     """Plan a linear-tangent-steering circularization burn for *vessel*,
     targeting a circular orbit at *target_altitude* meters."""
@@ -319,7 +322,7 @@ def plan_circularization(vessel, target_altitude: float) -> CircularizationPlan:
     )
 
     segments = build_segments(vessel)
-    sim = Simulator(mu, body_radius, target_altitude, segments)
+    sim = Simulator(mu, body_radius, target_altitude, segments, STAGING_DURATION)
 
     return sim.find_linear_tangent_params(r3d, v3d, time_to_apoapsis)
 
@@ -519,8 +522,8 @@ def gravity_turn(conn, turn_start_alt, turn_end_alt):
 
         # Auto-staging during burn
         if vessel.available_thrust == 0 and vessel.control.current_stage > 0:
+            separation_start = ut()
             vessel.control.throttle = 0.0
-            time.sleep(0.5)
             vessel.control.activate_next_stage()
             print("\n  ⚡ STAGE SEPARATION")
             time.sleep(0.5)
@@ -529,6 +532,7 @@ def gravity_turn(conn, turn_start_alt, turn_end_alt):
                 print("  ⚡ ENGINE IGNITION")
                 time.sleep(0.3)
             vessel.control.throttle = 1.0
+            print(f"Staging took: {ut() - separation_start} sec")
 
         ecc = eccentricity()
         print_telemetry(
@@ -550,7 +554,6 @@ def gravity_turn(conn, turn_start_alt, turn_end_alt):
             print("\n  ⚠ Burn exceeded planned duration; stopping.")
             break
         prev_ecc = ecc
-        time.sleep(0.05)
 
     vessel.control.throttle = 0.0
     print(f"\n  ✓ Circularization complete!")

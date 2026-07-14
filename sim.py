@@ -147,10 +147,11 @@ class RocketSegment:
     thrust: float
     max_burn_time: float
     initial_mass: float
-    # True if a real decouple/staging event (modeled as a 1 second coast)
-    # follows this segment before the next one begins. False if the next
-    # segment begins immediately (e.g. one engine group in a multi-group
-    # segment ran dry while another continues, with no part separation).
+    # True if a real decouple/staging event (modeled as a coast lasting
+    # Simulator.staging_duration seconds) follows this segment before the
+    # next one begins. False if the next segment begins immediately (e.g.
+    # one engine group in a multi-group segment ran dry while another
+    # continues, with no part separation).
     last_segment_of_stage: bool
 
 
@@ -420,10 +421,12 @@ class Simulator:
         body_radius: float,
         target_altitude: float,
         segments: list[RocketSegment],
+        staging_duration: float,
     ) -> None:
         self.mu = mu
         self.target_radius = body_radius + target_altitude
         self.segments = segments
+        self.staging_duration = staging_duration
 
     @_validate
     def solve_coast(
@@ -465,13 +468,13 @@ class Simulator:
     @_validate
     def total_burn_budget(self) -> float:
         """Total elapsed time available across all remaining segments,
-        including a 1 second staging coast after each segment whose
-        `last_segment_of_stage` is True (except the last segment, which has
-        no following segment to coast into)."""
+        including a `self.staging_duration` second staging coast after each
+        segment whose `last_segment_of_stage` is True (except the last
+        segment, which has no following segment to coast into)."""
         n = len(self.segments)
         total = sum(segment.max_burn_time for segment in self.segments)
         total += sum(
-            1.0
+            self.staging_duration
             for i, segment in enumerate(self.segments)
             if segment.last_segment_of_stage and i < n - 1
         )
@@ -482,7 +485,8 @@ class Simulator:
         """Estimate the total elapsed time (mirroring the segment/staging-coast
         accounting in `propagate_linear_tangent`) needed to deliver
         `delta_v` of delta-v, assuming each segment fully burns before the
-        next segment begins (with a 1 second staging coast in between).
+        next segment begins (with a `self.staging_duration` second staging
+        coast in between).
 
         This ignores steering losses (it assumes the full delta-v goes into
         useful velocity change) and is meant only to produce a reasonable
@@ -507,7 +511,7 @@ class Simulator:
             elapsed += segment.max_burn_time
 
             if segment.last_segment_of_stage and i < n_segments - 1:
-                elapsed += 1.0
+                elapsed += self.staging_duration
 
         # Ran out of segments before delivering the requested delta-v; fall
         # back on the full burn budget as a safe upper bound.
@@ -524,15 +528,15 @@ class Simulator:
         burn_time: float,
     ) -> BurnResult:
         """Burn under the linear-tangent steering law for `burn_time` seconds
-        total, walking across segment boundaries (with a 1 second staging
-        coast between them) as needed.
+        total, walking across segment boundaries (with a `self.staging_duration`
+        second staging coast between them) as needed.
 
         `burn_time` is the total elapsed time from the start of the first
-        segment, including any 1 second staging coasts along the way. The
-        time reference `t` used for the linear-tangent steering law (see
-        `linear_tangent_dynamics`) is likewise continuous across segment
-        boundaries and staging coasts: it is never reset to 0 at the start
-        of a later segment.
+        segment, including any `self.staging_duration` second staging coasts
+        along the way. The time reference `t` used for the linear-tangent
+        steering law (see `linear_tangent_dynamics`) is likewise continuous
+        across segment boundaries and staging coasts: it is never reset to 0
+        at the start of a later segment.
         """
         remaining = burn_time
         elapsed = 0.0
@@ -565,10 +569,11 @@ class Simulator:
             r, v, mass = to_rvm(cast(Vector, solution.y[:, -1]))
 
             if segment.last_segment_of_stage and i < n_segments - 1:
-                # Simulate staging as a 1 second coast, which also counts
-                # against the requested burn_time budget. Clamp to
-                # `remaining` in case the deadline falls inside this window.
-                staging_duration = min(1.0, remaining)
+                # Simulate staging as a `self.staging_duration` second
+                # coast, which also counts against the requested burn_time
+                # budget. Clamp to `remaining` in case the deadline falls
+                # inside this window.
+                staging_duration = min(self.staging_duration, remaining)
                 coast = self.solve_coast((0, staging_duration), r, v)
                 # Cast needed because y is type ndarray[float64 | complex128]
                 r, v = to_rv(cast(Vector, coast.y[:, -1]))
@@ -677,8 +682,8 @@ class Simulator:
             # delta-v needed at the pre-burn apoapsis to raise the far apsis
             # (which may switch from periapsis to apoapsis) to the target
             # radius, then converting that delta-v to a burn time assuming
-            # each segment fully burns before the next (with 1 second
-            # staging coasts in between).
+            # each segment fully burns before the next (with staging
+            # coasts in between).
             a_before = orbit.semi_major_axis
             ra_before = orbit.apoapsis_radius
             v1 = math.sqrt(self.mu * (2 / ra_before - 1 / a_before))
@@ -802,6 +807,7 @@ def main() -> None:
             body_radius=KERBIN_RADIUS,
             target_altitude=TARGET_ALTITUDE,
             segments=[SWIVEL, TERRIER],
+            staging_duration=1.0,
         )
 
         R3D = np.array([428392.15435586, -1053.61873734, -455905.93323801])
