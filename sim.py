@@ -141,7 +141,7 @@ MAX_ERROR = 1e18
 
 
 @dataclass
-class Stage:
+class RocketSegment:
     name: str
     ve: float
     thrust: float
@@ -415,7 +415,11 @@ class Simulator:
 
     @_validate
     def __init__(
-        self, mu: float, body_radius: float, target_altitude: float, stages: list[Stage]
+        self,
+        mu: float,
+        body_radius: float,
+        target_altitude: float,
+        stages: list[RocketSegment],
     ) -> None:
         self.mu = mu
         self.target_radius = body_radius + target_altitude
@@ -442,7 +446,7 @@ class Simulator:
         t_duration: float,
         r: Vector,
         v: Vector,
-        stage: Stage,
+        stage: RocketSegment,
         a_coeff: float,
         b_coeff: float,
         ref_angle: float,
@@ -772,7 +776,7 @@ def main() -> None:
         TARGET_ALTITUDE = 80_000
 
         # Swivel in vacuum:
-        SWIVEL = Stage(
+        SWIVEL = RocketSegment(
             "Swivel",
             ve=320 * 9.80665,  # m / sec
             thrust=215_000.0,  # Newtons = kg m / sec^2
@@ -782,7 +786,7 @@ def main() -> None:
         )
 
         # Terrier
-        TERRIER = Stage(
+        TERRIER = RocketSegment(
             "Terrier",
             ve=345 * 9.80665,  # m / sec
             thrust=60_000.0,  # Newtons = kg m / sec^2, flow_rate=17.7341950083118 kg/sec

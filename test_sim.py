@@ -11,7 +11,7 @@ pytestmark = pytest.mark.filterwarnings("error::RuntimeWarning")
 from sim import (
     CircularizationPlan,
     OrbitalPlane,
-    Stage,
+    RocketSegment,
     Simulator,
     orbital_elements,
     to_rv,
@@ -29,7 +29,7 @@ V3D = np.array([1.03031015e03, -9.32270447e-01, -1.19588146e02])
 TIME_TO_APOAPSIS = 103.31401749403551
 
 # Swivel in vacuum:
-SWIVEL = Stage(
+SWIVEL = RocketSegment(
     "Swivel",
     ve=320 * 9.80665,  # m / sec
     thrust=215_000.0,  # Newtons = kg m / sec^2
@@ -39,7 +39,7 @@ SWIVEL = Stage(
 )
 
 # Terrier
-TERRIER = Stage(
+TERRIER = RocketSegment(
     "Terrier",
     ve=345 * 9.80665,  # m / sec
     thrust=60_000.0,  # Newtons = kg m / sec^2, flow_rate=17.7341950083118 kg/sec
@@ -597,7 +597,7 @@ def test_total_burn_budget_no_staging_coast_when_not_last_segment_of_stage():
     """No 1 second staging coast should be added after a stage whose
     last_segment_of_stage is False, since no real part separation happens
     there -- the next segment continues immediately."""
-    stage_a = Stage(
+    stage_a = RocketSegment(
         "A",
         ve=SWIVEL.ve,
         thrust=SWIVEL.thrust,
@@ -605,7 +605,7 @@ def test_total_burn_budget_no_staging_coast_when_not_last_segment_of_stage():
         initial_mass=1000.0,
         last_segment_of_stage=False,
     )
-    stage_b = Stage(
+    stage_b = RocketSegment(
         "B",
         ve=TERRIER.ve,
         thrust=TERRIER.thrust,
@@ -627,7 +627,7 @@ def test_total_burn_budget_no_staging_coast_when_not_last_segment_of_stage():
         body_radius=KERBIN_RADIUS,
         target_altitude=TARGET_ALTITUDE,
         stages=[
-            Stage(
+            RocketSegment(
                 "A",
                 ve=stage_a.ve,
                 thrust=stage_a.thrust,
@@ -720,7 +720,7 @@ def test_propagate_linear_tangent_no_staging_coast_when_not_last_segment_of_stag
     r0 = plane.to_plane(R3D)
     v0 = plane.to_plane(V3D)
 
-    stage_a = Stage(
+    stage_a = RocketSegment(
         "A",
         ve=SWIVEL.ve,
         thrust=SWIVEL.thrust,
@@ -728,7 +728,7 @@ def test_propagate_linear_tangent_no_staging_coast_when_not_last_segment_of_stag
         initial_mass=SWIVEL.initial_mass,
         last_segment_of_stage=False,
     )
-    stage_b = Stage(
+    stage_b = RocketSegment(
         "B",
         ve=TERRIER.ve,
         thrust=TERRIER.thrust,

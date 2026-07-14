@@ -28,7 +28,7 @@ import krpc
 import numpy as np
 from collections import namedtuple
 
-from sim import CircularizationPlan, Simulator, Stage
+from sim import CircularizationPlan, RocketSegment, Simulator
 
 # Standard gravitational acceleration (m/s²), used for Isp ↔ exhaust velocity.
 G0 = 9.80665
@@ -169,9 +169,9 @@ def _discover_engine_groups(vessel, active_only=True, stage_filter=None):
     return groups
 
 
-def build_stages(vessel) -> list[Stage]:
-    """Build the list of sim.Stage segments describing the vessel's
-    remaining engine/fuel state, for use with Simulator.
+def build_stages(vessel) -> list[RocketSegment]:
+    """Build the list of sim.RocketSegment instances describing the
+    vessel's remaining engine/fuel state, for use with Simulator.
 
     Accounts for:
     * **Multiple engine groups** — engines with separate fuel supplies that
@@ -184,16 +184,16 @@ def build_stages(vessel) -> list[Stage]:
 
     The vessel's remaining burn is walked as a sequence of *segments*, each
     with a constant set of active engine groups (and therefore constant
-    total thrust and combined Isp), becoming one ``Stage`` each. A segment
+    total thrust and combined Isp), becoming one ``RocketSegment`` each. A segment
     ends either when the first engine group within it runs dry while
     others still have fuel left (no part separation happens, so the next
-    segment's ``Stage.last_segment_of_stage`` is ``False`` and it begins
+    segment's ``RocketSegment.last_segment_of_stage`` is ``False`` and it begins
     immediately with the remaining group(s)), or when all currently active
     engine groups are spent simultaneously and staging is required to
     reach the next group of engines (``last_segment_of_stage=True``,
     modeled elsewhere as a 1 second coast before the next stage).
     """
-    stages: list[Stage] = []
+    stages: list[RocketSegment] = []
 
     m = vessel.mass  # kg
     current_stage = vessel.control.current_stage
@@ -260,7 +260,7 @@ def build_stages(vessel) -> list[Stage]:
         last_segment_of_stage = not remaining_after
 
         stages.append(
-            Stage(
+            RocketSegment(
                 name=name,
                 ve=ve,
                 thrust=F_total,
