@@ -14,7 +14,6 @@ from sim import (
     Stage,
     Simulator,
     orbital_elements,
-    project,
     to_rv,
     to_rvm,
 )
@@ -98,10 +97,12 @@ COAST_FINISH = DynamicsTestState(
 
 def test_coast_dynamics(sim):
     """Verify coasting propagation matches recorded KSP trajectory."""
-    r_hat, w_hat, r, v = project(COAST_START.r3d, COAST_START.v3d)
+    plane = OrbitalPlane(COAST_START.r3d, COAST_START.v3d)
+    r = plane.to_plane(COAST_START.r3d)
+    v = plane.to_plane(COAST_START.v3d)
 
     def full(vec):
-        return vec[0] * r_hat + vec[1] * w_hat
+        return plane.from_plane(vec)
 
     np.testing.assert_allclose(full(r), COAST_START.r3d)
 
@@ -559,7 +560,9 @@ def test_solve_linear_tangent_t_offset(sim):
     """solve_linear_tangent's t domain should start at t_offset (not 0),
     so that the linear-tangent steering law's time reference continues
     from wherever a previous stage left off."""
-    r_hat, w_hat, r0, v0 = project(R3D, V3D)
+    plane = OrbitalPlane(R3D, V3D)
+    r0 = plane.to_plane(R3D)
+    v0 = plane.to_plane(V3D)
     t_offset = 100.0
 
     solution = sim.solve_linear_tangent(
@@ -642,7 +645,9 @@ def test_propagate_linear_tangent_burn_time_includes_staging_seconds(sim):
     """burn_time should include the 1 second staging coast, so the second
     stage should only burn for `burn_time - stage1.max_burn_time - 1.0`
     seconds, not `burn_time - stage1.max_burn_time`."""
-    r_hat, w_hat, r0, v0 = project(R3D, V3D)
+    plane = OrbitalPlane(R3D, V3D)
+    r0 = plane.to_plane(R3D)
+    v0 = plane.to_plane(V3D)
     partial_stage2_time = 10.0
     burn_time = SWIVEL.max_burn_time + 1.0 + partial_stage2_time
 
@@ -657,7 +662,9 @@ def test_propagate_linear_tangent_deadline_inside_staging_window(sim):
     """If burn_time's deadline falls inside the mandatory 1 second staging
     coast, only a partial coast should be applied, and stage 2 should not
     be started at all."""
-    r_hat, w_hat, r0, v0 = project(R3D, V3D)
+    plane = OrbitalPlane(R3D, V3D)
+    r0 = plane.to_plane(R3D)
+    v0 = plane.to_plane(V3D)
     partial_staging_time = 0.5
     burn_time = SWIVEL.max_burn_time + partial_staging_time
 
@@ -681,7 +688,9 @@ def test_propagate_linear_tangent_continuous_time_across_stages(sim, monkeypatch
     """solve_linear_tangent's t_offset should continue from wherever the
     previous stage plus staging coast left off, not reset to 0 at the
     start of each stage."""
-    r_hat, w_hat, r0, v0 = project(R3D, V3D)
+    plane = OrbitalPlane(R3D, V3D)
+    r0 = plane.to_plane(R3D)
+    v0 = plane.to_plane(V3D)
 
     t_offsets: list[float] = []
     original = Simulator.solve_linear_tangent
@@ -707,7 +716,9 @@ def test_propagate_linear_tangent_no_staging_coast_when_not_last_segment_of_stag
     should transition straight into the next stage with no 1 second staging
     coast: the next stage's solve_linear_tangent call should start at the
     same t_offset the previous stage ended at (no +1.0)."""
-    r_hat, w_hat, r0, v0 = project(R3D, V3D)
+    plane = OrbitalPlane(R3D, V3D)
+    r0 = plane.to_plane(R3D)
+    v0 = plane.to_plane(V3D)
 
     stage_a = Stage(
         "A",
@@ -752,9 +763,37 @@ def test_propagate_linear_tangent_no_staging_coast_when_not_last_segment_of_stag
 # --- OrbitalPlane tests ---
 
 
+def test_orbital_plane_eq_same_vectors():
+    plane1 = OrbitalPlane(R3D, V3D)
+    plane2 = OrbitalPlane(R3D, V3D)
+
+    assert plane1 == plane2
+
+
+def test_orbital_plane_eq_different_vectors():
+    plane1 = OrbitalPlane(R3D, V3D)
+    plane2 = OrbitalPlane(COAST_START.r3d, COAST_START.v3d)
+
+    assert plane1 != plane2
+
+
+def test_orbital_plane_eq_not_implemented_for_other_types():
+    plane = OrbitalPlane(R3D, V3D)
+
+    assert plane != "not a plane"
+
+
+def test_orbital_plane_repr_contains_basis_vectors():
+    plane = OrbitalPlane(R3D, V3D)
+
+    text = repr(plane)
+    assert text.startswith("OrbitalPlane(")
+    assert "r_hat" in text
+    assert "w_hat" in text
+
+
 def test_orbital_plane_to_plane_from_plane_roundtrip():
-    r_hat, w_hat, _, _ = project(R3D, V3D)
-    plane = OrbitalPlane(r_hat, w_hat)
+    plane = OrbitalPlane(R3D, V3D)
 
     v2d = vector(123.4, -567.8)
     v3d = plane.from_plane(v2d)
@@ -763,8 +802,7 @@ def test_orbital_plane_to_plane_from_plane_roundtrip():
 
 
 def test_orbital_plane_to_angle_3d_matches_2d():
-    r_hat, w_hat, _, _ = project(R3D, V3D)
-    plane = OrbitalPlane(r_hat, w_hat)
+    plane = OrbitalPlane(R3D, V3D)
 
     v2d = vector(1.0, 1.0)
     v3d = plane.from_plane(v2d)
@@ -774,8 +812,7 @@ def test_orbital_plane_to_angle_3d_matches_2d():
 
 
 def test_orbital_plane_to_angle_wraps_negative_to_positive():
-    r_hat, w_hat, _, _ = project(R3D, V3D)
-    plane = OrbitalPlane(r_hat, w_hat)
+    plane = OrbitalPlane(R3D, V3D)
 
     v2d = vector(1.0, -1.0)  # atan2 -> -pi/4
     angle = plane.to_angle(v2d)
@@ -785,13 +822,13 @@ def test_orbital_plane_to_angle_wraps_negative_to_positive():
 
 
 def test_orbital_plane_to_angle_zero_at_r_hat():
-    """By construction of project(), the position vector used to build
+    """By construction of OrbitalPlane, the position vector used to build
     r_hat/w_hat lies entirely along r_hat, i.e. at angle ~0 (mod 2*pi;
     floating-point noise in the (near-zero) w_hat component can push the
     raw atan2 result to either side of 0, which to_angle then wraps to
     just under 2*pi instead of just above 0)."""
-    r_hat, w_hat, r0, v0 = project(R3D, V3D)
-    plane = OrbitalPlane(r_hat, w_hat)
+    plane = OrbitalPlane(R3D, V3D)
+    r0 = plane.to_plane(R3D)
 
     for angle in (plane.to_angle(R3D), plane.to_angle(r0)):
         wrapped = min(angle, 2 * math.pi - angle)

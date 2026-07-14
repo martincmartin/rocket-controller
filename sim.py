@@ -176,14 +176,50 @@ class BurnResult:
     mass: float
 
 
-@dataclass
 class OrbitalPlane:
     """A fixed 2D plane within 3D space, spanned by orthonormal unit vectors
     r_hat (radial direction) and w_hat (in-plane tangential direction),
     used to represent in-plane orbital motion as 2D vectors."""
 
-    r_hat: Vector
-    w_hat: Vector
+    @_validate
+    def __init__(self, r: Vector, v: Vector) -> None:
+        """Build the (r_hat, w_hat) basis for the orbital plane containing
+        the 3D position `r` and velocity `v`."""
+        # r = 0 means at the center of the body; since we're above the
+        # surface, r should never be close to zero, so we can divide with
+        # confidence.
+        r_norm = np.linalg.norm(r)
+        r_hat = r / r_norm
+
+        v_dot_r_hat = np.dot(v, r_hat)
+
+        w = v - v_dot_r_hat * r_hat
+        w_norm = np.linalg.norm(w)
+        # If r and v are nearly parallel, we can clean things up a bit by
+        # doing "twice is enough" re-orthogonalization, if
+        # norm(w) < 1e-4*norm(v).
+        if w_norm < 1e-4 * np.linalg.norm(v):
+            w = w - np.dot(w, r_hat) * r_hat
+            w_norm = np.linalg.norm(w)
+
+        # Should probably check that norm(w) isn't near zero, that happens
+        # when the rocket is going straight up and velocity is parallel to
+        # position.  Oh well.
+        w_hat = w / w_norm
+
+        self.r_hat = r_hat
+        self.w_hat = w_hat
+
+    def __repr__(self) -> str:
+        return f"OrbitalPlane(r_hat={self.r_hat!r}, w_hat={self.w_hat!r})"
+
+    def __eq__(self, other: object) -> bool:
+        if not isinstance(other, OrbitalPlane):
+            return NotImplemented
+        return bool(
+            np.array_equal(self.r_hat, other.r_hat)
+            and np.array_equal(self.w_hat, other.w_hat)
+        )
 
     @_validate
     def to_plane(self, v3d: Vector) -> Vector:
@@ -225,33 +261,6 @@ class CircularizationPlan:
 
 def cross2d(r: Vector, v: Vector) -> float:
     return float(r[0] * v[1] - r[1] * v[0])
-
-
-@_validate
-def project(r: Vector, v: Vector) -> tuple[Vector, Vector, Vector, Vector]:
-    # r = 0 means at the center of the body; since we're above the surface,
-    # r should never be close to zero, so we can divide with confidence.
-    r_norm = np.linalg.norm(r)
-    r_hat = r / r_norm
-
-    v_dot_r_hat = np.dot(v, r_hat)
-
-    w = v - v_dot_r_hat * r_hat
-    w_norm = np.linalg.norm(w)
-    # If u and v are nearly parallel, we can clean things up a bit by doing
-    # "twice is enough re-orthogonalization", if norm(w) < 1e-4*norm(v).
-    if w_norm < 1e-4 * np.linalg.norm(v):
-        w = w - np.dot(w, r_hat) * r_hat
-        w_norm = np.linalg.norm(w)
-
-    # Should probably check that norm(w) isn't near zero, that happens when the rocket
-    # is going straight up and velocity is parallel to position.  Oh well.
-    w_hat = w / w_norm
-
-    r_projected = np.array([r_norm, 0])
-    v_projected = np.array([v_dot_r_hat, np.dot(v, w_hat)])
-
-    return (r_hat, w_hat, r_projected, v_projected)
 
 
 def to_rv(state: Vector) -> tuple[Vector, Vector]:
@@ -640,7 +649,9 @@ class Simulator:
         with TimingContext(
             label="find_linear_tangent_params", auto_print=False
         ) as timer:
-            r_hat, w_hat, r, v = project(r3d, v3d)
+            plane = OrbitalPlane(r3d, v3d)
+            r = plane.to_plane(r3d)
+            v = plane.to_plane(v3d)
 
             # Find the prograde direction at apoapsis
             orbit = orbital_elements(r, v, self.mu)
@@ -746,7 +757,7 @@ class Simulator:
         r_coast, v_coast = to_rv(coast_fn(coast_time))
 
         return CircularizationPlan(
-            plane=OrbitalPlane(r_hat, w_hat),
+            plane=plane,
             r_coast=r_coast,
             v_coast=v_coast,
             a_coeff=float(a_coeff),
