@@ -286,14 +286,23 @@ def build_stages(vessel) -> list[Stage]:
 
 
 def print_telemetry(
-    altitude, apoapsis, periapsis, pitch, throttle, speed, phase: str = ""
+    altitude,
+    apoapsis,
+    periapsis,
+    pitch,
+    throttle,
+    speed,
+    phase: str = "",
+    eccentricity: float | None = None,
 ):
     """Print a single-line telemetry readout to the console."""
+    ecc_str = f"Ecc {eccentricity:>7.5f}  " if eccentricity is not None else ""
     print(
         f"\r  {phase:<20s}  "
         f"Alt {altitude:>8.0f} m  "
         f"Ap {apoapsis:>8.0f} m  "
         f"Pe {periapsis:>8.0f} m  "
+        f"{ecc_str}"
         f"Pitch {pitch:>5.1f}°  "
         f"Thr {throttle:>3.0%}  "
         f"Spd {speed:>7.1f} m/s",
@@ -426,6 +435,7 @@ def gravity_turn(conn, turn_start_alt, turn_end_alt):
         vessel.control.throttle = throttle
 
         if ap > ENGINE_CUTOFF_ALTITUDE * AP_WARP_MARGIN:
+            print("Turning off warp!")
             conn.space_center.physics_warp_factor = 0  # 1× physics warp when close.
 
         # ── Auto-staging (fuel depletion check) ─────────────────────────
@@ -544,11 +554,12 @@ def gravity_turn(conn, turn_start_alt, turn_end_alt):
             vessel.control.throttle,
             speed(),
             "Circularizing",
+            eccentricity=ecc,
         )
 
-        # Stop once eccentricity bottoms out (apsides equal) or just starts
-        # rising again (we've overshot the minimum).
-        if ecc <= ECC_TOLERANCE or ecc > prev_ecc:
+        # Stop once eccentricity is close enough to zero (apsides equal)
+        # AND has just started rising again (we've passed the minimum).
+        if ecc <= ECC_TOLERANCE and ecc > prev_ecc:
             break
         if t > plan.burn_time * BURN_TIME_SAFETY_MARGIN:
             print("\n  ⚠ Burn exceeded planned duration; stopping.")
