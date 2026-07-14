@@ -59,7 +59,7 @@ def sim():
         MU,
         body_radius=KERBIN_RADIUS,
         target_altitude=TARGET_ALTITUDE,
-        stages=[SWIVEL, TERRIER],
+        segments=[SWIVEL, TERRIER],
     )
 
 
@@ -319,7 +319,7 @@ def test_target_velocity_magnitude_and_perpendicularity(sim):
 def test_target_velocity_ccw_direction():
     """At r=(R,0) with a CCW-pointing v (+y), target velocity should point +y."""
     sim = Simulator(
-        MU, body_radius=KERBIN_RADIUS, target_altitude=TARGET_ALTITUDE, stages=[]
+        MU, body_radius=KERBIN_RADIUS, target_altitude=TARGET_ALTITUDE, segments=[]
     )
     R = 680_000.0
     r = vector(R, 0.0)
@@ -334,7 +334,7 @@ def test_target_velocity_ccw_direction():
 def test_target_velocity_cw_direction():
     """At r=(R,0) with a CW-pointing v (-y), target velocity should point -y."""
     sim = Simulator(
-        MU, body_radius=KERBIN_RADIUS, target_altitude=TARGET_ALTITUDE, stages=[]
+        MU, body_radius=KERBIN_RADIUS, target_altitude=TARGET_ALTITUDE, segments=[]
     )
     R = 680_000.0
     r = vector(R, 0.0)
@@ -351,7 +351,7 @@ def test_target_velocity_rotated_position():
     used elsewhere in this file: periapsis along +y, CCW velocity is -x),
     target velocity should point in -x."""
     sim = Simulator(
-        MU, body_radius=KERBIN_RADIUS, target_altitude=TARGET_ALTITUDE, stages=[]
+        MU, body_radius=KERBIN_RADIUS, target_altitude=TARGET_ALTITUDE, segments=[]
     )
     R = 680_000.0
     r = vector(0.0, R)
@@ -366,7 +366,7 @@ def test_target_velocity_rotated_position():
 def test_target_velocity_independent_of_input_speed_magnitude():
     """Only the sign/direction of v should matter, not its magnitude."""
     sim = Simulator(
-        MU, body_radius=KERBIN_RADIUS, target_altitude=TARGET_ALTITUDE, stages=[]
+        MU, body_radius=KERBIN_RADIUS, target_altitude=TARGET_ALTITUDE, segments=[]
     )
     r = vector(680_000.0, 0.0)
 
@@ -381,7 +381,7 @@ def test_target_velocity_with_radial_component_ccw():
     The radial component should be ignored; result should match the pure
     CCW-tangential case."""
     sim = Simulator(
-        MU, body_radius=KERBIN_RADIUS, target_altitude=TARGET_ALTITUDE, stages=[]
+        MU, body_radius=KERBIN_RADIUS, target_altitude=TARGET_ALTITUDE, segments=[]
     )
     R = 680_000.0
     r = vector(R, 0.0)
@@ -398,7 +398,7 @@ def test_target_velocity_with_radial_component_cw():
     """v has both a radial (-x, inward) and a CW tangential (-y) component.
     The radial component (and its sign) should not affect the result."""
     sim = Simulator(
-        MU, body_radius=KERBIN_RADIUS, target_altitude=TARGET_ALTITUDE, stages=[]
+        MU, body_radius=KERBIN_RADIUS, target_altitude=TARGET_ALTITUDE, segments=[]
     )
     R = 680_000.0
     r = vector(R, 0.0)
@@ -416,7 +416,7 @@ def test_target_velocity_purely_radial_input_defaults_to_ccw():
     flip condition (`dot < 0`) never triggers, so the implementation
     defaults to the CCW direction.  This test documents that behavior."""
     sim = Simulator(
-        MU, body_radius=KERBIN_RADIUS, target_altitude=TARGET_ALTITUDE, stages=[]
+        MU, body_radius=KERBIN_RADIUS, target_altitude=TARGET_ALTITUDE, segments=[]
     )
     R = 680_000.0
     r = vector(R, 0.0)
@@ -431,7 +431,7 @@ def test_target_velocity_purely_radial_input_defaults_to_ccw():
 def test_target_velocity_arbitrary_angle_ccw():
     """r at an arbitrary angle (not on an axis); v purely tangential CCW."""
     sim = Simulator(
-        MU, body_radius=KERBIN_RADIUS, target_altitude=TARGET_ALTITUDE, stages=[]
+        MU, body_radius=KERBIN_RADIUS, target_altitude=TARGET_ALTITUDE, segments=[]
     )
     R = 750_000.0
     theta = math.radians(37.0)  # arbitrary angle, not a multiple of 45
@@ -454,7 +454,7 @@ def test_target_velocity_arbitrary_angle_cw_with_radial_component():
     radial (outward) and a CW tangential component.  Result direction
     should follow the tangential (CW) sign, ignoring the radial part."""
     sim = Simulator(
-        MU, body_radius=KERBIN_RADIUS, target_altitude=TARGET_ALTITUDE, stages=[]
+        MU, body_radius=KERBIN_RADIUS, target_altitude=TARGET_ALTITUDE, segments=[]
     )
     R = 750_000.0
     theta = math.radians(163.0)  # arbitrary angle, second quadrant
@@ -523,7 +523,7 @@ def test_find_linear_tangent_params_memoizes_simulation(monkeypatch):
         MU,
         body_radius=KERBIN_RADIUS,
         target_altitude=TARGET_ALTITUDE,
-        stages=[SWIVEL, TERRIER],
+        segments=[SWIVEL, TERRIER],
     )
 
     calls: list[tuple[float, ...]] = []
@@ -559,7 +559,7 @@ def test_find_linear_tangent_params_memoizes_simulation(monkeypatch):
 def test_solve_linear_tangent_t_offset(sim):
     """solve_linear_tangent's t domain should start at t_offset (not 0),
     so that the linear-tangent steering law's time reference continues
-    from wherever a previous stage left off."""
+    from wherever a previous segment left off."""
     plane = OrbitalPlane(R3D, V3D)
     r0 = plane.to_plane(R3D)
     v0 = plane.to_plane(V3D)
@@ -586,18 +586,21 @@ def test_total_burn_budget_includes_staging(sim):
     assert sim.total_burn_budget() == pytest.approx(expected)
 
 
-def test_total_burn_budget_single_stage_no_staging():
-    single_stage_sim = Simulator(
-        MU, body_radius=KERBIN_RADIUS, target_altitude=TARGET_ALTITUDE, stages=[SWIVEL]
+def test_total_burn_budget_single_segment_no_staging_coast():
+    single_segment_sim = Simulator(
+        MU,
+        body_radius=KERBIN_RADIUS,
+        target_altitude=TARGET_ALTITUDE,
+        segments=[SWIVEL],
     )
-    assert single_stage_sim.total_burn_budget() == pytest.approx(SWIVEL.max_burn_time)
+    assert single_segment_sim.total_burn_budget() == pytest.approx(SWIVEL.max_burn_time)
 
 
 def test_total_burn_budget_no_staging_coast_when_not_last_segment_of_stage():
-    """No 1 second staging coast should be added after a stage whose
+    """No 1 second staging coast should be added after a segment whose
     last_segment_of_stage is False, since no real part separation happens
     there -- the next segment continues immediately."""
-    stage_a = RocketSegment(
+    segment_a = RocketSegment(
         "A",
         ve=SWIVEL.ve,
         thrust=SWIVEL.thrust,
@@ -605,7 +608,7 @@ def test_total_burn_budget_no_staging_coast_when_not_last_segment_of_stage():
         initial_mass=1000.0,
         last_segment_of_stage=False,
     )
-    stage_b = RocketSegment(
+    segment_b = RocketSegment(
         "B",
         ve=TERRIER.ve,
         thrust=TERRIER.thrust,
@@ -618,7 +621,7 @@ def test_total_burn_budget_no_staging_coast_when_not_last_segment_of_stage():
         MU,
         body_radius=KERBIN_RADIUS,
         target_altitude=TARGET_ALTITUDE,
-        stages=[stage_a, stage_b],
+        segments=[segment_a, segment_b],
     )
     assert no_coast_sim.total_burn_budget() == pytest.approx(30.0)
 
@@ -626,16 +629,16 @@ def test_total_burn_budget_no_staging_coast_when_not_last_segment_of_stage():
         MU,
         body_radius=KERBIN_RADIUS,
         target_altitude=TARGET_ALTITUDE,
-        stages=[
+        segments=[
             RocketSegment(
                 "A",
-                ve=stage_a.ve,
-                thrust=stage_a.thrust,
-                max_burn_time=stage_a.max_burn_time,
-                initial_mass=stage_a.initial_mass,
+                ve=segment_a.ve,
+                thrust=segment_a.thrust,
+                max_burn_time=segment_a.max_burn_time,
+                initial_mass=segment_a.initial_mass,
                 last_segment_of_stage=True,
             ),
-            stage_b,
+            segment_b,
         ],
     )
     assert with_coast_sim.total_burn_budget() == pytest.approx(31.0)
@@ -643,24 +646,24 @@ def test_total_burn_budget_no_staging_coast_when_not_last_segment_of_stage():
 
 def test_propagate_linear_tangent_burn_time_includes_staging_seconds(sim):
     """burn_time should include the 1 second staging coast, so the second
-    stage should only burn for `burn_time - stage1.max_burn_time - 1.0`
-    seconds, not `burn_time - stage1.max_burn_time`."""
+    segment should only burn for `burn_time - segment1.max_burn_time - 1.0`
+    seconds, not `burn_time - segment1.max_burn_time`."""
     plane = OrbitalPlane(R3D, V3D)
     r0 = plane.to_plane(R3D)
     v0 = plane.to_plane(V3D)
-    partial_stage2_time = 10.0
-    burn_time = SWIVEL.max_burn_time + 1.0 + partial_stage2_time
+    partial_segment2_time = 10.0
+    burn_time = SWIVEL.max_burn_time + 1.0 + partial_segment2_time
 
     result = sim.propagate_linear_tangent(r0, v0, 0.0, 0.0, 0.0, burn_time)
 
     mdot2 = TERRIER.thrust / TERRIER.ve
-    expected_mass = TERRIER.initial_mass - mdot2 * partial_stage2_time
+    expected_mass = TERRIER.initial_mass - mdot2 * partial_segment2_time
     assert result.mass == pytest.approx(expected_mass)
 
 
 def test_propagate_linear_tangent_deadline_inside_staging_window(sim):
     """If burn_time's deadline falls inside the mandatory 1 second staging
-    coast, only a partial coast should be applied, and stage 2 should not
+    coast, only a partial coast should be applied, and segment 2 should not
     be started at all."""
     plane = OrbitalPlane(R3D, V3D)
     r0 = plane.to_plane(R3D)
@@ -670,7 +673,7 @@ def test_propagate_linear_tangent_deadline_inside_staging_window(sim):
 
     result = sim.propagate_linear_tangent(r0, v0, 0.0, 0.0, 0.0, burn_time)
 
-    # Manually reproduce: burn stage 1 fully, then coast for only
+    # Manually reproduce: burn segment 1 fully, then coast for only
     # partial_staging_time (not the full 1.0 second).
     solution1 = sim.solve_linear_tangent(
         0, SWIVEL.max_burn_time, r0, v0, SWIVEL, 0.0, 0.0, 0.0
@@ -684,10 +687,10 @@ def test_propagate_linear_tangent_deadline_inside_staging_window(sim):
     assert result.v == pytest.approx(v_expected)
 
 
-def test_propagate_linear_tangent_continuous_time_across_stages(sim, monkeypatch):
+def test_propagate_linear_tangent_continuous_time_across_segments(sim, monkeypatch):
     """solve_linear_tangent's t_offset should continue from wherever the
-    previous stage plus staging coast left off, not reset to 0 at the
-    start of each stage."""
+    previous segment plus staging coast left off, not reset to 0 at the
+    start of each segment."""
     plane = OrbitalPlane(R3D, V3D)
     r0 = plane.to_plane(R3D)
     v0 = plane.to_plane(V3D)
@@ -695,10 +698,10 @@ def test_propagate_linear_tangent_continuous_time_across_stages(sim, monkeypatch
     t_offsets: list[float] = []
     original = Simulator.solve_linear_tangent
 
-    def spy(self, t_offset, duration, r, v, stage, a_coeff, b_coeff, ref_angle):
+    def spy(self, t_offset, duration, r, v, segment, a_coeff, b_coeff, ref_angle):
         t_offsets.append(t_offset)
         return original(
-            self, t_offset, duration, r, v, stage, a_coeff, b_coeff, ref_angle
+            self, t_offset, duration, r, v, segment, a_coeff, b_coeff, ref_angle
         )
 
     monkeypatch.setattr(Simulator, "solve_linear_tangent", spy)
@@ -712,15 +715,15 @@ def test_propagate_linear_tangent_continuous_time_across_stages(sim, monkeypatch
 def test_propagate_linear_tangent_no_staging_coast_when_not_last_segment_of_stage(
     monkeypatch,
 ):
-    """When a stage's last_segment_of_stage is False, propagate_linear_tangent
-    should transition straight into the next stage with no 1 second staging
-    coast: the next stage's solve_linear_tangent call should start at the
-    same t_offset the previous stage ended at (no +1.0)."""
+    """When a segment's last_segment_of_stage is False, propagate_linear_tangent
+    should transition straight into the next segment with no 1 second staging
+    coast: the next segment's solve_linear_tangent call should start at the
+    same t_offset the previous segment ended at (no +1.0)."""
     plane = OrbitalPlane(R3D, V3D)
     r0 = plane.to_plane(R3D)
     v0 = plane.to_plane(V3D)
 
-    stage_a = RocketSegment(
+    segment_a = RocketSegment(
         "A",
         ve=SWIVEL.ve,
         thrust=SWIVEL.thrust,
@@ -728,7 +731,7 @@ def test_propagate_linear_tangent_no_staging_coast_when_not_last_segment_of_stag
         initial_mass=SWIVEL.initial_mass,
         last_segment_of_stage=False,
     )
-    stage_b = RocketSegment(
+    segment_b = RocketSegment(
         "B",
         ve=TERRIER.ve,
         thrust=TERRIER.thrust,
@@ -740,24 +743,24 @@ def test_propagate_linear_tangent_no_staging_coast_when_not_last_segment_of_stag
         MU,
         body_radius=KERBIN_RADIUS,
         target_altitude=TARGET_ALTITUDE,
-        stages=[stage_a, stage_b],
+        segments=[segment_a, segment_b],
     )
 
     t_offsets: list[float] = []
     original = Simulator.solve_linear_tangent
 
-    def spy(self, t_offset, duration, r, v, stage, a_coeff, b_coeff, ref_angle):
+    def spy(self, t_offset, duration, r, v, segment, a_coeff, b_coeff, ref_angle):
         t_offsets.append(t_offset)
         return original(
-            self, t_offset, duration, r, v, stage, a_coeff, b_coeff, ref_angle
+            self, t_offset, duration, r, v, segment, a_coeff, b_coeff, ref_angle
         )
 
     monkeypatch.setattr(Simulator, "solve_linear_tangent", spy)
 
-    burn_time = stage_a.max_burn_time + 10.0
+    burn_time = segment_a.max_burn_time + 10.0
     no_coast_sim.propagate_linear_tangent(r0, v0, 0.0, 0.0, 0.0, burn_time)
 
-    assert t_offsets == [pytest.approx(0.0), pytest.approx(stage_a.max_burn_time)]
+    assert t_offsets == [pytest.approx(0.0), pytest.approx(segment_a.max_burn_time)]
 
 
 # --- OrbitalPlane tests ---

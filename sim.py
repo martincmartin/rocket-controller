@@ -148,8 +148,8 @@ class RocketSegment:
     max_burn_time: float
     initial_mass: float
     # True if a real decouple/staging event (modeled as a 1 second coast)
-    # follows this stage before the next one begins. False if the next
-    # stage begins immediately (e.g. one engine group in a multi-group
+    # follows this segment before the next one begins. False if the next
+    # segment begins immediately (e.g. one engine group in a multi-group
     # segment ran dry while another continues, with no part separation).
     last_segment_of_stage: bool
 
@@ -419,11 +419,11 @@ class Simulator:
         mu: float,
         body_radius: float,
         target_altitude: float,
-        stages: list[RocketSegment],
+        segments: list[RocketSegment],
     ) -> None:
         self.mu = mu
         self.target_radius = body_radius + target_altitude
-        self.stages = stages
+        self.segments = segments
 
     @_validate
     def solve_coast(
@@ -446,17 +446,17 @@ class Simulator:
         t_duration: float,
         r: Vector,
         v: Vector,
-        stage: RocketSegment,
+        segment: RocketSegment,
         a_coeff: float,
         b_coeff: float,
         ref_angle: float,
     ) -> OdeResult:
-        assert t_duration <= stage.max_burn_time
+        assert t_duration <= segment.max_burn_time
         return solve_ivp(
             linear_tangent_dynamics,
             (t_offset, t_offset + t_duration),
-            (r[0], r[1], v[0], v[1], stage.initial_mass),
-            args=(self.mu, stage.ve, stage.thrust, a_coeff, b_coeff, ref_angle),
+            (r[0], r[1], v[0], v[1], segment.initial_mass),
+            args=(self.mu, segment.ve, segment.thrust, a_coeff, b_coeff, ref_angle),
             rtol=1e-10,
             atol=self.ATOL_THRUST_VECTOR,
             dense_output=True,
@@ -464,25 +464,25 @@ class Simulator:
 
     @_validate
     def total_burn_budget(self) -> float:
-        """Total elapsed time available across all remaining stages,
-        including a 1 second staging coast after each stage whose
-        `last_segment_of_stage` is True (except the last stage, which has
-        no following stage to coast into)."""
-        n = len(self.stages)
-        total = sum(stage.max_burn_time for stage in self.stages)
+        """Total elapsed time available across all remaining segments,
+        including a 1 second staging coast after each segment whose
+        `last_segment_of_stage` is True (except the last segment, which has
+        no following segment to coast into)."""
+        n = len(self.segments)
+        total = sum(segment.max_burn_time for segment in self.segments)
         total += sum(
             1.0
-            for i, stage in enumerate(self.stages)
-            if stage.last_segment_of_stage and i < n - 1
+            for i, segment in enumerate(self.segments)
+            if segment.last_segment_of_stage and i < n - 1
         )
         return total
 
     @_validate
     def burn_time_for_delta_v(self, delta_v: float) -> float:
-        """Estimate the total elapsed time (mirroring the stage/staging-coast
+        """Estimate the total elapsed time (mirroring the segment/staging-coast
         accounting in `propagate_linear_tangent`) needed to deliver
-        `delta_v` of delta-v, assuming each stage fully burns before the next
-        stage begins (with a 1 second staging coast in between).
+        `delta_v` of delta-v, assuming each segment fully burns before the
+        next segment begins (with a 1 second staging coast in between).
 
         This ignores steering losses (it assumes the full delta-v goes into
         useful velocity change) and is meant only to produce a reasonable
@@ -490,26 +490,26 @@ class Simulator:
         """
         remaining_dv = delta_v
         elapsed = 0.0
-        n_stages = len(self.stages)
+        n_segments = len(self.segments)
 
-        for i, stage in enumerate(self.stages):
-            mdot = stage.thrust / stage.ve
-            m_final = stage.initial_mass - mdot * stage.max_burn_time
-            stage_dv = stage.ve * math.log(stage.initial_mass / m_final)
+        for i, segment in enumerate(self.segments):
+            mdot = segment.thrust / segment.ve
+            m_final = segment.initial_mass - mdot * segment.max_burn_time
+            segment_dv = segment.ve * math.log(segment.initial_mass / m_final)
 
-            if remaining_dv <= stage_dv:
-                t = (stage.initial_mass * stage.ve / stage.thrust) * (
-                    1 - math.exp(-remaining_dv / stage.ve)
+            if remaining_dv <= segment_dv:
+                t = (segment.initial_mass * segment.ve / segment.thrust) * (
+                    1 - math.exp(-remaining_dv / segment.ve)
                 )
                 return elapsed + t
 
-            remaining_dv -= stage_dv
-            elapsed += stage.max_burn_time
+            remaining_dv -= segment_dv
+            elapsed += segment.max_burn_time
 
-            if stage.last_segment_of_stage and i < n_stages - 1:
+            if segment.last_segment_of_stage and i < n_segments - 1:
                 elapsed += 1.0
 
-        # Ran out of stages before delivering the requested delta-v; fall
+        # Ran out of segments before delivering the requested delta-v; fall
         # back on the full burn budget as a safe upper bound.
         return self.total_burn_budget()
 
@@ -524,47 +524,47 @@ class Simulator:
         burn_time: float,
     ) -> BurnResult:
         """Burn under the linear-tangent steering law for `burn_time` seconds
-        total, walking across stage boundaries (with a 1 second staging
+        total, walking across segment boundaries (with a 1 second staging
         coast between them) as needed.
 
         `burn_time` is the total elapsed time from the start of the first
-        stage, including any 1 second staging coasts along the way. The
+        segment, including any 1 second staging coasts along the way. The
         time reference `t` used for the linear-tangent steering law (see
-        `linear_tangent_dynamics`) is likewise continuous across stage
+        `linear_tangent_dynamics`) is likewise continuous across segment
         boundaries and staging coasts: it is never reset to 0 at the start
-        of a later stage.
+        of a later segment.
         """
         remaining = burn_time
         elapsed = 0.0
         mass = math.nan
-        n_stages = len(self.stages)
+        n_segments = len(self.segments)
 
-        for i, stage in enumerate(self.stages):
-            duration = min(remaining, stage.max_burn_time)
+        for i, segment in enumerate(self.segments):
+            duration = min(remaining, segment.max_burn_time)
             solution = self.solve_linear_tangent(
                 elapsed,
                 duration,
                 r,
                 v,
-                stage,
+                segment,
                 a_coeff,
                 b_coeff,
                 ref_angle,
             )
             assert solution.sol is not None
 
-            if remaining <= stage.max_burn_time:
+            if remaining <= segment.max_burn_time:
                 assert solution.t[-1] == elapsed + duration
                 r, v, mass = to_rvm(cast(Vector, solution.y[:, -1]))
                 return BurnResult(r, v, mass)
 
-            # Fully burn this stage.
-            remaining -= stage.max_burn_time
-            elapsed += stage.max_burn_time
+            # Fully burn this segment.
+            remaining -= segment.max_burn_time
+            elapsed += segment.max_burn_time
             # Cast needed because y is type ndarray[float64 | complex128]
             r, v, mass = to_rvm(cast(Vector, solution.y[:, -1]))
 
-            if stage.last_segment_of_stage and i < n_stages - 1:
+            if segment.last_segment_of_stage and i < n_segments - 1:
                 # Simulate staging as a 1 second coast, which also counts
                 # against the requested burn_time budget. Clamp to
                 # `remaining` in case the deadline falls inside this window.
@@ -579,7 +579,7 @@ class Simulator:
                     state = np.array([r[0], r[1], v[0], v[1], mass])
                     return BurnResult(r, v, mass)
 
-        # Ran out of stages before using all of the requested burn time.
+        # Ran out of segments before using all of the requested burn time.
         return BurnResult(r, v, mass)
 
     @staticmethod
@@ -677,8 +677,8 @@ class Simulator:
             # delta-v needed at the pre-burn apoapsis to raise the far apsis
             # (which may switch from periapsis to apoapsis) to the target
             # radius, then converting that delta-v to a burn time assuming
-            # each stage fully burns before the next (with 1 second staging
-            # coasts in between).
+            # each segment fully burns before the next (with 1 second
+            # staging coasts in between).
             a_before = orbit.semi_major_axis
             ra_before = orbit.apoapsis_radius
             v1 = math.sqrt(self.mu * (2 / ra_before - 1 / a_before))
@@ -801,7 +801,7 @@ def main() -> None:
             MU,
             body_radius=KERBIN_RADIUS,
             target_altitude=TARGET_ALTITUDE,
-            stages=[SWIVEL, TERRIER],
+            segments=[SWIVEL, TERRIER],
         )
 
         R3D = np.array([428392.15435586, -1053.61873734, -455905.93323801])

@@ -168,7 +168,7 @@ def _discover_engine_groups(vessel, active_only=True, stage_filter=None):
     return groups
 
 
-def build_stages(vessel) -> list[RocketSegment]:
+def build_segments(vessel) -> list[RocketSegment]:
     """Build the list of sim.RocketSegment instances describing the
     vessel's remaining engine/fuel state, for use with Simulator.
 
@@ -192,7 +192,7 @@ def build_stages(vessel) -> list[RocketSegment]:
     reach the next group of engines (``last_segment_of_stage=True``,
     modeled elsewhere as a 1 second coast before the next stage).
     """
-    stages: list[RocketSegment] = []
+    segments: list[RocketSegment] = []
 
     m = vessel.mass  # kg
     current_stage = vessel.control.current_stage
@@ -247,7 +247,7 @@ def build_stages(vessel) -> list[RocketSegment]:
         remaining_after = [g for g in groups if g.fuel_duration > min_dur + 0.001]
         last_segment_of_stage = not remaining_after
 
-        stages.append(
+        segments.append(
             RocketSegment(
                 name=name,
                 ve=ve,
@@ -268,7 +268,7 @@ def build_stages(vessel) -> list[RocketSegment]:
         for g in groups:
             g.fuel_duration -= min_dur
 
-    return stages
+    return segments
 
 
 def print_telemetry(
@@ -318,8 +318,8 @@ def plan_circularization(vessel, target_altitude: float) -> CircularizationPlan:
         f"{r3d=}, {v3d=}, {vessel.mass=}, mu={mu}, time to apoapsis={time_to_apoapsis}"
     )
 
-    stages = build_stages(vessel)
-    sim = Simulator(mu, body_radius, target_altitude, stages)
+    segments = build_segments(vessel)
+    sim = Simulator(mu, body_radius, target_altitude, segments)
 
     return sim.find_linear_tangent_params(r3d, v3d, time_to_apoapsis)
 
