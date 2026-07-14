@@ -6,13 +6,15 @@ Performs an automated launch from the pad through gravity turn and into
 a circular orbit at the specified target altitude.
 
 Phases:
-  1. Vertical ascent & gravity turn (smooth pitch-over as a function of
-     altitude), with throttle tapering as apoapsis nears target
-  2. Plan the circularization burn (linear-tangent steering law) via
-     sim.Simulator.find_linear_tangent_params
-  3. Coast to the planned burn-start angle
-  4. Circularization burn, steering per the linear-tangent law, until
-     eccentricity bottoms out (apoapsis == periapsis)
+  Ascent & Gravity Turn — vertical ascent then smooth pitch-over as a
+    function of altitude, with throttle tapering as apoapsis nears target
+  Coast & Replan to Burn Start — coast toward apoapsis, continuously
+    replanning the circularization burn (linear-tangent steering law, via
+    sim.Simulator.find_linear_tangent_params) every iteration against the
+    vessel's live state, until the vessel reaches the (re-)planned burn-
+    start angle
+  Circularization Burn — burn per the linear-tangent law from the final
+    plan, until eccentricity bottoms out (apoapsis == periapsis)
 
 Usage:
   1. Place your rocket on the launch pad in KSP
@@ -304,9 +306,16 @@ def resource_mass(vessel):
 STAGING_DURATION = 2.5  # seconds; measured real-world KSP staging delay
 
 
-def plan_circularization(vessel, target_altitude: float) -> CircularizationPlan:
+def plan_circularization(
+    vessel, target_altitude: float, verbose: bool = True
+) -> CircularizationPlan:
     """Plan a linear-tangent-steering circularization burn for *vessel*,
-    targeting a circular orbit at *target_altitude* meters."""
+    targeting a circular orbit at *target_altitude* meters.
+
+    If `verbose` is True (the default), prints the vessel's state and the
+    optimizer's diagnostic summary. Set to False to suppress this, e.g.
+    when calling this repeatedly in a tight loop.
+    """
     body = vessel.orbit.body
     frame = body.non_rotating_reference_frame
 
@@ -317,14 +326,15 @@ def plan_circularization(vessel, target_altitude: float) -> CircularizationPlan:
     body_radius = body.equatorial_radius
     time_to_apoapsis = vessel.orbit.time_to_apoapsis
 
-    print(
-        f"{r3d=}, {v3d=}, {vessel.mass=}, mu={mu}, time to apoapsis={time_to_apoapsis}"
-    )
+    if verbose:
+        print(
+            f"{r3d=}, {v3d=}, {vessel.mass=}, mu={mu}, time to apoapsis={time_to_apoapsis}"
+        )
 
     segments = build_segments(vessel)
     sim = Simulator(mu, body_radius, target_altitude, segments, STAGING_DURATION)
 
-    return sim.find_linear_tangent_params(r3d, v3d, time_to_apoapsis)
+    return sim.find_linear_tangent_params(r3d, v3d, time_to_apoapsis, verbose=verbose)
 
 
 # Main gravity turn implementation.
@@ -379,9 +389,9 @@ def gravity_turn(conn, turn_start_alt, turn_end_alt):
     vessel.auto_pilot.target_roll = 90
 
     # ═══════════════════════════════════════════════════════════════════════
-    #  PHASE 1 — Ascent & Gravity Turn
+    #  Ascent & Gravity Turn
     # ═══════════════════════════════════════════════════════════════════════
-    print("\n── Phase 1: Ascent & Gravity Turn ──")
+    print("\n── Ascent & Gravity Turn ──")
     conn.space_center.physics_warp_factor = 1  # 2× physics warp during ascent
     turn_angle = 0.0
 
@@ -459,19 +469,11 @@ def gravity_turn(conn, turn_start_alt, turn_end_alt):
         time.sleep(0.1)
 
     # ═══════════════════════════════════════════════════════════════════════
-    #  PHASE 2 — Planning Circularization Burn
+    #  Coast & Replan to Burn Start
     # ═══════════════════════════════════════════════════════════════════════
-    print("\n── Phase 2: Planning Circularization Burn ──")
+    print("\n── Coast & Replan to Burn Start ──")
 
-    plan = plan_circularization(vessel, TARGET_ALTITUDE)
     frame = body.non_rotating_reference_frame
-    target_angle = plan.plane.to_angle(plan.r_coast)
-
-    # ═══════════════════════════════════════════════════════════════════════
-    #  PHASE 3 — Coast to Burn-Start Angle
-    # ═══════════════════════════════════════════════════════════════════════
-    print("\n── Phase 3: Coasting to Burn Start Angle ──")
-
     vessel.auto_pilot.reference_frame = frame
     vessel.auto_pilot.stopping_time = (
         2,
@@ -480,8 +482,23 @@ def gravity_turn(conn, turn_start_alt, turn_end_alt):
     )  # gentler corrections to avoid oscillation
 
     while True:
+        # Replan on every iteration against the vessel's live state: fuel
+        # burned, drag-induced orbital changes, and elapsed time all shift
+        # the optimal (coast_time, a_coeff, b_coeff, burn_time) solution.
+        plan = plan_circularization(vessel, TARGET_ALTITUDE, verbose=False)
+        target_angle = plan.plane.to_angle(plan.r_coast)
+
         pos = np.array(vessel.position(frame))
         current_angle = plan.plane.to_angle(pos)
+
+        # Angular distance still to go until the (re-)planned burn start,
+        # wrapped to (-180°, 180°] so it stays well-behaved regardless of
+        # where to_angle()'s (-pi, pi] discontinuity falls.
+        angle_remaining = math.degrees(target_angle - current_angle)
+        if angle_remaining > 180.0:
+            angle_remaining -= 360.0
+        elif angle_remaining <= -180.0:
+            angle_remaining += 360.0
 
         # Point toward the burn's initial attitude while coasting, so the
         # craft has time to rotate into position before ignition.
@@ -491,23 +508,25 @@ def gravity_turn(conn, turn_start_alt, turn_end_alt):
         )
         vessel.auto_pilot.target_direction = tuple(initial_dir)
 
-        if current_angle >= target_angle:
-            break
-
         print(
-            f"\r  Angle {math.degrees(current_angle):>7.2f}° / "
-            f"{math.degrees(target_angle):>7.2f}°, Ap {apoapsis():>8.0f} m   ",
+            f"\r  Angle left {angle_remaining:>7.2f}°  "
+            f"a {plan.a_coeff:>8.5f}  b {plan.b_coeff:>9.6f}  "
+            f"Burn {plan.burn_time:>6.1f} s  "
+            f"Ap {apoapsis():>8.0f} m  Pe {periapsis():>8.0f} m  "
+            f"Ecc {eccentricity():>7.5f}   ",
             end="",
             flush=True,
         )
-        time.sleep(0.05)
+
+        if angle_remaining <= 0.0:
+            break
     print()
 
     # ═══════════════════════════════════════════════════════════════════════
-    #  PHASE 4 — Circularization Burn
+    #  Circularization Burn
     # ═══════════════════════════════════════════════════════════════════════
     conn.space_center.physics_warp_factor = 0  # back to 1× for the burn
-    print("\n── Phase 4: Circularization Burn ──")
+    print("\n── Circularization Burn ──")
     vessel.control.throttle = 1.0
     burn_start_ut = ut()
     prev_ecc = eccentricity()

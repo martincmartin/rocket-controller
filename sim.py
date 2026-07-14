@@ -235,15 +235,12 @@ class OrbitalPlane:
 
     @_validate
     def to_angle(self, v: Vector) -> float:
-        """Return the polar angle (radians, in [0, 2*pi)) of `v` within this
+        """Return the polar angle (radians, in (-pi, pi]) of `v` within this
         plane. `v` may be a 3D vector (projected via `to_plane` first) or an
         already-2D vector (e.g. the output of `to_plane`)."""
         if v.shape[0] == 3:
             v = self.to_plane(v)
-        angle = math.atan2(v[1], v[0])
-        if angle < 0:
-            angle += 2 * math.pi
-        return angle
+        return math.atan2(v[1], v[0])
 
 
 @dataclass
@@ -640,6 +637,7 @@ class Simulator:
         r3d: Vector,
         v3d: Vector,
         time_to_apoapsis: float,
+        verbose: bool = True,
     ) -> CircularizationPlan:
         """Find linear-tangent steering parameters (coast_time, a_coeff,
         b_coeff, burn_time) that circularize the orbit, using SLSQP with
@@ -654,6 +652,11 @@ class Simulator:
         The objective is simply `burn_time`, i.e. find the earliest
         (coast_time, a_coeff, b_coeff, burn_time) combination that satisfies
         both constraints.
+
+        If `verbose` is True (the default), prints a diagnostic summary of
+        the solution (coast/burn time, coefficients, residuals, timing).
+        Set to False to suppress this, e.g. when calling this repeatedly in
+        a tight loop.
         """
         with TimingContext(
             label="find_linear_tangent_params", auto_print=False
@@ -749,19 +752,22 @@ class Simulator:
             ineq_residual = ineq_constraint(final_params)
 
         # Print summary (outside context so timing is finalized)
-        print("\n***** SLSQP linear-tangent solution")
-        print(f"Coast time:          {coast_time:8.2f} s")
-        print(f"a coefficient:       {a_coeff:8.6f}")
-        print(f"b coefficient:       {b_coeff:8.6f}")
-        print(f"Burn time:           {burn_time:8.2f} s")
-        ap_alt = final_orbit.apoapsis_radius - KERBIN_RADIUS
-        pe_alt = final_orbit.periapsis_radius - KERBIN_RADIUS
-        print(f"Apoapsis:            {ap_alt:8.2f} m")
-        print(f"Periapsis:           {pe_alt:8.2f} m")
-        print(f"Velocity residual:  ({eq_residual[0]:8.4f}, {eq_residual[1]:8.4f}) m/s")
-        print(f"Radius residual:     {ineq_residual[0]:8.2f} m")
-        print(f"Optimizer success:   {res.success} ({res.message})")
-        print(timer.summary())
+        if verbose:
+            print("\n***** SLSQP linear-tangent solution")
+            print(f"Coast time:          {coast_time:8.2f} s")
+            print(f"a coefficient:       {a_coeff:8.6f}")
+            print(f"b coefficient:       {b_coeff:8.6f}")
+            print(f"Burn time:           {burn_time:8.2f} s")
+            ap_alt = final_orbit.apoapsis_radius - KERBIN_RADIUS
+            pe_alt = final_orbit.periapsis_radius - KERBIN_RADIUS
+            print(f"Apoapsis:            {ap_alt:8.2f} m")
+            print(f"Periapsis:           {pe_alt:8.2f} m")
+            print(
+                f"Velocity residual:  ({eq_residual[0]:8.4f}, {eq_residual[1]:8.4f}) m/s"
+            )
+            print(f"Radius residual:     {ineq_residual[0]:8.2f} m")
+            print(f"Optimizer success:   {res.success} ({res.message})")
+            print(timer.summary())
 
         r_coast, v_coast = to_rv(coast_fn(coast_time))
 

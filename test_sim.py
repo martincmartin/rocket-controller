@@ -856,25 +856,23 @@ def test_orbital_plane_to_angle_3d_matches_2d():
     assert plane.to_angle(v2d) == pytest.approx(math.pi / 4)
 
 
-def test_orbital_plane_to_angle_wraps_negative_to_positive():
+def test_orbital_plane_to_angle_matches_atan2_range():
     plane = OrbitalPlane(R3D, V3D)
 
     v2d = vector(1.0, -1.0)  # atan2 -> -pi/4
     angle = plane.to_angle(v2d)
 
-    assert 0.0 <= angle < 2 * math.pi
-    assert angle == pytest.approx(2 * math.pi - math.pi / 4)
+    assert -math.pi < angle <= math.pi
+    assert angle == pytest.approx(-math.pi / 4)
 
 
 def test_orbital_plane_to_angle_zero_at_r_hat():
     """By construction of OrbitalPlane, the position vector used to build
-    r_hat/w_hat lies entirely along r_hat, i.e. at angle ~0 (mod 2*pi;
-    floating-point noise in the (near-zero) w_hat component can push the
-    raw atan2 result to either side of 0, which to_angle then wraps to
-    just under 2*pi instead of just above 0)."""
+    r_hat/w_hat lies entirely along r_hat, i.e. at angle ~0 (floating-point
+    noise in the (near-zero) w_hat component can push the raw atan2 result
+    to either side of 0, but no wraparound should occur)."""
     plane = OrbitalPlane(R3D, V3D)
     r0 = plane.to_plane(R3D)
 
     for angle in (plane.to_angle(R3D), plane.to_angle(r0)):
-        wrapped = min(angle, 2 * math.pi - angle)
-        assert wrapped == pytest.approx(0.0, abs=1e-9)
+        assert angle == pytest.approx(0.0, abs=1e-9)
