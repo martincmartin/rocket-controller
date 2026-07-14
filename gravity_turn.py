@@ -481,6 +481,7 @@ def gravity_turn(conn, turn_start_alt, turn_end_alt):
         2,
     )  # gentler corrections to avoid oscillation
 
+    first_iteration = True
     while True:
         # Replan on every iteration against the vessel's live state: fuel
         # burned, drag-induced orbital changes, and elapsed time all shift
@@ -500,6 +501,11 @@ def gravity_turn(conn, turn_start_alt, turn_end_alt):
         elif angle_remaining <= -180.0:
             angle_remaining += 360.0
 
+        # Drop out of physics warp shortly before the burn so the autopilot
+        # has full control authority to settle into the burn attitude.
+        if angle_remaining <= 1.0:
+            conn.space_center.physics_warp_factor = 0
+
         # Point toward the burn's initial attitude while coasting, so the
         # craft has time to rotate into position before ignition.
         theta0 = plan.ref_angle + math.atan(plan.a_coeff)
@@ -512,11 +518,15 @@ def gravity_turn(conn, turn_start_alt, turn_end_alt):
             f"\r  Angle left {angle_remaining:>7.2f}°  "
             f"a {plan.a_coeff:>8.5f}  b {plan.b_coeff:>9.6f}  "
             f"Burn {plan.burn_time:>6.1f} s  "
-            f"Ap {apoapsis():>8.0f} m  Pe {periapsis():>8.0f} m  "
+            f"Ap {apoapsis():>7.0f}/{plan.final_apoapsis_altitude:<7.0f} m  "
+            f"Pe {periapsis():>7.0f}/{plan.final_periapsis_altitude:<7.0f} m  "
             f"Ecc {eccentricity():>7.5f}   ",
             end="",
             flush=True,
         )
+        if first_iteration:
+            print()  # preserve the initial values in scrollback for comparison
+            first_iteration = False
 
         if angle_remaining <= 0.0:
             break

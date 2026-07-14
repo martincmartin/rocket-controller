@@ -134,8 +134,6 @@ class TimingContext:
         return "\n".join(lines)
 
 
-KERBIN_RADIUS = 600_000
-
 # Making this np.inf leads to np.inf - np.inf inside scipi, which is Nan.
 MAX_ERROR = 1e18
 
@@ -255,6 +253,8 @@ class CircularizationPlan:
     b_coeff: float
     burn_time: float
     ref_angle: float
+    final_apoapsis_altitude: float  # predicted altitude (m) after the burn
+    final_periapsis_altitude: float  # predicted altitude (m) after the burn
 
 
 def cross2d(r: Vector, v: Vector) -> float:
@@ -421,6 +421,7 @@ class Simulator:
         staging_duration: float,
     ) -> None:
         self.mu = mu
+        self.body_radius = body_radius
         self.target_radius = body_radius + target_altitude
         self.segments = segments
         self.staging_duration = staging_duration
@@ -750,6 +751,8 @@ class Simulator:
             final_orbit = orbital_elements(result.r, result.v, self.mu)
             eq_residual = eq_constraint(final_params)
             ineq_residual = ineq_constraint(final_params)
+            ap_alt = final_orbit.apoapsis_radius - self.body_radius
+            pe_alt = final_orbit.periapsis_radius - self.body_radius
 
         # Print summary (outside context so timing is finalized)
         if verbose:
@@ -758,8 +761,6 @@ class Simulator:
             print(f"a coefficient:       {a_coeff:8.6f}")
             print(f"b coefficient:       {b_coeff:8.6f}")
             print(f"Burn time:           {burn_time:8.2f} s")
-            ap_alt = final_orbit.apoapsis_radius - KERBIN_RADIUS
-            pe_alt = final_orbit.periapsis_radius - KERBIN_RADIUS
             print(f"Apoapsis:            {ap_alt:8.2f} m")
             print(f"Periapsis:           {pe_alt:8.2f} m")
             print(
@@ -779,6 +780,8 @@ class Simulator:
             b_coeff=float(b_coeff),
             burn_time=float(burn_time),
             ref_angle=float(ref_angle),
+            final_apoapsis_altitude=ap_alt,
+            final_periapsis_altitude=pe_alt,
         )
 
 
@@ -807,6 +810,7 @@ def main() -> None:
         )
 
         MU = 3.5316e12
+        KERBIN_RADIUS = 600_000
 
         sim = Simulator(
             MU,
