@@ -253,6 +253,7 @@ class CircularizationPlan:
     b_coeff: float
     burn_time: float
     ref_angle: float
+    coast_time: float  # predicted seconds from now until burn should start
     final_apoapsis_altitude: float  # predicted altitude (m) after the burn
     final_periapsis_altitude: float  # predicted altitude (m) after the burn
 
@@ -780,6 +781,7 @@ class Simulator:
             b_coeff=float(b_coeff),
             burn_time=float(burn_time),
             ref_angle=float(ref_angle),
+            coast_time=float(coast_time),
             final_apoapsis_altitude=ap_alt,
             final_periapsis_altitude=pe_alt,
         )

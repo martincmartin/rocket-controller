@@ -503,7 +503,7 @@ def gravity_turn(conn, turn_start_alt, turn_end_alt):
 
         # Drop out of physics warp shortly before the burn so the autopilot
         # has full control authority to settle into the burn attitude.
-        if angle_remaining <= 1.0:
+        if plan.coast_time <= 10.0:
             conn.space_center.physics_warp_factor = 0
 
         # Point toward the burn's initial attitude while coasting, so the
@@ -515,7 +515,7 @@ def gravity_turn(conn, turn_start_alt, turn_end_alt):
         vessel.auto_pilot.target_direction = tuple(initial_dir)
 
         print(
-            f"\r  Angle left {angle_remaining:>7.2f}°  "
+            f"\r  Angle left {angle_remaining:>7.2f}°  Coast {plan.coast_time:>6.1f} s  "
             f"a {plan.a_coeff:>8.5f}  b {plan.b_coeff:>9.6f}  "
             f"Burn {plan.burn_time:>6.1f} s  "
             f"Ap {apoapsis():>7.0f}/{plan.final_apoapsis_altitude:<7.0f} m  "
