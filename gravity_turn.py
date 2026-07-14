@@ -132,7 +132,6 @@ def _engine_group_stats(engines):
     if fuel_dur in (float("inf"), 0):
         return None
 
-    print(f"{rep.part.title}: {thrust=}, {flow_rate=}, {fuel_dur=}")
     return EngineGroup(rep.part.title, thrust, flow_rate, fuel_dur)
 
 
@@ -197,7 +196,6 @@ def build_stages(vessel) -> list[RocketSegment]:
 
     m = vessel.mass  # kg
     current_stage = vessel.control.current_stage
-    print(f"Initial mass: {m} at stage: {current_stage}")
 
     # Start with the currently active engine groups.
     groups = _discover_engine_groups(vessel, active_only=True)
@@ -214,16 +212,6 @@ def build_stages(vessel) -> list[RocketSegment]:
                     p.dry_mass
                     for p in vessel.parts.all
                     if p.decouple_stage == current_stage
-                )
-                print(
-                    [
-                        p.title
-                        for p in vessel.parts.all
-                        if p.decouple_stage == current_stage
-                    ]
-                )
-                print(
-                    f"During stage {current_stage} separation, dropping {drop} kg, so mass goes from {m} to {m - drop}"
                 )
                 m -= drop
                 current_stage -= 1
@@ -271,12 +259,10 @@ def build_stages(vessel) -> list[RocketSegment]:
         )
 
         mass_consumed = total_flow * min_dur
-        print(f"mass consumed: {mass_consumed}")
         if mass_consumed >= m:
             print(f"!!! WTF????")
             break
         m -= mass_consumed
-        print(f"Mass after burn: {m}")
 
         groups = remaining_after
         for g in groups:
@@ -435,7 +421,6 @@ def gravity_turn(conn, turn_start_alt, turn_end_alt):
         vessel.control.throttle = throttle
 
         if ap > ENGINE_CUTOFF_ALTITUDE * AP_WARP_MARGIN:
-            print("Turning off warp!")
             conn.space_center.physics_warp_factor = 0  # 1× physics warp when close.
 
         # ── Auto-staging (fuel depletion check) ─────────────────────────
@@ -523,7 +508,7 @@ def gravity_turn(conn, turn_start_alt, turn_end_alt):
     vessel.control.throttle = 1.0
     burn_start_ut = ut()
     prev_ecc = eccentricity()
-    ECC_TOLERANCE = 0.0005  # "circular enough" eccentricity to stop the burn
+    ECC_TOLERANCE = 0.01  # "circular enough" eccentricity to stop the burn
     BURN_TIME_SAFETY_MARGIN = 1.5  # abort if we run this much past the plan
 
     while True:
