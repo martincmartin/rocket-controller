@@ -1,25 +1,17 @@
 #!/usr/bin/env python3
+
 """
-Gravity Turn Launch Script for Kerbin (KSP + kRPC)
+Flight controller for Kerbal Space Program.
 
-Performs an automated launch from the pad through gravity turn and into
-a circular orbit at the specified target altitude.
+This module interfaces with KSP through kRPC and executes an automated launch
+from the pad through gravity turn and into orbit. It performs the gravity turn,
+staging, throttle management, and circularization burn while continuously
+monitoring the live vehicle state.
 
-Phases:
-  Ascent & Gravity Turn — vertical ascent then smooth pitch-over as a
-    function of altitude, with throttle tapering as apoapsis nears target
-  Coast & Replan to Burn Start — coast toward apoapsis, continuously
-    replanning the circularization burn (linear-tangent steering law, via
-    sim.Simulator.find_linear_tangent_params) every iteration against the
-    vessel's live state, until the vessel reaches the (re-)planned burn-
-    start angle
-  Circularization Burn — burn per the linear-tangent law from the final
-    plan, until eccentricity bottoms out (apoapsis == periapsis)
-
-Usage:
-  1. Place your rocket on the launch pad in KSP
-  2. Make sure the kRPC server is running (toolbar → kRPC → Start Server)
-  3. Run:  python gravity_turn.py
+Trajectory planning is delegated to sim.py. This module converts the current
+vessel into the simulator's abstract RocketSegment model, requests an updated
+circularization plan as the trajectory evolves, and flies the resulting
+steering law in real time.
 
 Tunable parameters are grouped at the top of main() for easy adjustment.
 """
@@ -540,7 +532,7 @@ def gravity_turn(conn, turn_start_alt, turn_end_alt):
     vessel.control.throttle = 1.0
     burn_start_ut = ut()
     prev_ecc = eccentricity()
-    ECC_TOLERANCE = 0.01  # "circular enough" eccentricity to stop the burn
+    ECC_TOLERANCE = 0.1  # "circular enough" eccentricity to stop the burn
     BURN_TIME_SAFETY_MARGIN = 1.5  # abort if we run this much past the plan
 
     while True:

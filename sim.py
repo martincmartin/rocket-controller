@@ -1,5 +1,29 @@
 #!/usr/bin/env python3
 
+"""
+Trajectory planning and orbital simulation.
+
+This module contains the physics and optimization code used to plan orbital
+maneuvers. It models rocket dynamics, propagates coasting and powered flight,
+and solves for guidance parameters that achieve a desired orbit.
+
+The simulator is intentionally independent of Kerbal Space Program and kRPC.
+It operates only on physical quantities (position, velocity, mass, thrust,
+specific impulse, gravitational parameter, etc.) and has no knowledge of game
+objects or telemetry interfaces.
+
+Responsibilities
+----------------
+- Propagate ballistic and powered trajectories with SciPy ODE solvers.
+- Model multi-stage rockets as a sequence of constant-thrust burn segments.
+- Compute orbital elements from propagated states.
+- Optimize linear-tangent steering laws for orbit insertion and
+  circularization.
+
+This module computes flight plans. Executing those plans in KSP is the
+responsibility of the flight-control layer.
+"""
+
 import functools
 import math
 import resource
