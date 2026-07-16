@@ -35,14 +35,23 @@ class FakeStream:
 class FakeAutoPilot:
     def __init__(self) -> None:
         self.disengaged = False
+        self.target_roll = 0.0
+        self.target_pitch = None
+        self.target_heading = None
 
     def disengage(self) -> None:
         self.disengaged = True
+
+    def target_pitch_and_heading(self, pitch: float, heading: float) -> None:
+        self.target_pitch = pitch
+        self.target_heading = heading
 
 
 class FakeControl:
     def __init__(self) -> None:
         self.throttle = 1.0
+        self.sas = False
+        self.rcs = False
 
 
 class FakeVessel:
@@ -110,12 +119,19 @@ def test_normal_exit_removes_every_stream(conn):
 def test_normal_exit_resets_throttle_autopilot_and_warp(conn):
     vessel = conn.space_center.active_vessel
     vessel.control.throttle = 1.0
+    vessel.control.sas = True
+    vessel.control.rcs = True
     conn.space_center.physics_warp_factor = 3
 
     with FlightSession(conn):
         pass
 
     assert vessel.control.throttle == 0.0
+    assert vessel.control.sas is False
+    assert vessel.control.rcs is False
+    assert vessel.auto_pilot.target_roll == 90.0
+    assert vessel.auto_pilot.target_pitch == 90
+    assert vessel.auto_pilot.target_heading == 90
     assert vessel.auto_pilot.disengaged
     assert conn.space_center.physics_warp_factor == 0
 

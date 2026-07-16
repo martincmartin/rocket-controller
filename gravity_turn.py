@@ -505,6 +505,13 @@ def gravity_turn(
     # repeated reads don't each cost a network round trip.
     position = fs.add_stream(vessel.position, frame)
     velocity = fs.add_stream(vessel.velocity, frame)
+    # Auto-staging checks (ascent + circularization loops) and the Coast
+    # & Replan loop's replanning input -- all read every iteration of a
+    # tight loop, so streamed for the same reason as the telemetry above.
+    available_thrust = fs.add_stream(getattr, vessel, "available_thrust")
+    current_stage = fs.add_stream(getattr, vessel.control, "current_stage")
+    thrust = fs.add_stream(getattr, vessel, "thrust")
+    time_to_apoapsis = fs.add_stream(getattr, vessel.orbit, "time_to_apoapsis")
 
     # ── Pre-Launch Setup ────────────────────────────────────────────────────
     vessel.control.sas = False
@@ -566,13 +573,13 @@ def gravity_turn(
             conn.space_center.physics_warp_factor = 0  # 1× physics warp when close.
 
         # ── Auto-staging (fuel depletion check) ─────────────────────────
-        if vessel.available_thrust == 0 and vessel.control.current_stage > 0:
+        if available_thrust() == 0 and current_stage() > 0:
             time.sleep(0.5)  # brief pause so decouplers don't double-fire
             vessel.control.activate_next_stage()
             print("\n  ⚡ STAGE SEPARATION")
             time.sleep(0.5)
             # Some craft designs need a second activation (e.g. decouple then ignite)
-            if vessel.available_thrust == 0 and vessel.control.current_stage > 0:
+            if available_thrust() == 0 and current_stage() > 0:
                 vessel.control.activate_next_stage()
                 print("  ⚡ ENGINE IGNITION")
                 time.sleep(0.3)
@@ -594,7 +601,7 @@ def gravity_turn(
     )
 
     # Wait for solid boosters to burn out, and to be (mostly) out of the atmosphere
-    while vessel.thrust > 0 or altitude() < ATMOSPHERE_ALTITUDE:
+    while thrust() > 0 or altitude() < ATMOSPHERE_ALTITUDE:
         time.sleep(0.1)
 
     # ═══════════════════════════════════════════════════════════════════════
@@ -609,6 +616,12 @@ def gravity_turn(
         2,
     )  # gentler corrections to avoid oscillation
 
+    # Engine/fuel state doesn't change while coasting (no thrust, no
+    # staging), so this is computed once here rather than re-derived
+    # (many blocking per-engine/per-part round trips) on every iteration
+    # of the loop below.
+    segments = build_segments(vessel)
+
     first_iteration = True
     while True:
         # Snapshot position/velocity once per iteration, under both
@@ -619,14 +632,13 @@ def gravity_turn(
         # values would otherwise advance past what the plan was based on.
         r3d = np.array(position())
         v3d = np.array(velocity())
-        time_to_apoapsis = vessel.orbit.time_to_apoapsis
-        segments = build_segments(vessel)
+        tta = time_to_apoapsis()
 
         # Replan on every iteration against the vessel's live state: fuel
         # burned, drag-induced orbital changes, and elapsed time all shift
         # the optimal (coast_time, a_coeff, b_coeff, burn_time) solution.
         sim = Simulator(mu, body_radius, TARGET_ALTITUDE, segments, STAGING_DURATION)
-        plan = sim.find_linear_tangent_params(r3d, v3d, time_to_apoapsis, verbose=False)
+        plan = sim.find_linear_tangent_params(r3d, v3d, tta, verbose=False)
         target_angle = plan.plane.to_angle(plan.r_coast)
         current_angle = plan.plane.to_angle(r3d)
 
@@ -675,7 +687,8 @@ def gravity_turn(
     # ═══════════════════════════════════════════════════════════════════════
     conn.space_center.physics_warp_factor = 0  # back to 1× for the burn
     print("\n── Circularization Burn ──")
-    vessel.control.throttle = 1.0
+    throttle = 1.0
+    vessel.control.throttle = throttle
     burn_start_ut = ut()
     prev_ecc = eccentricity()
     ECC_TOLERANCE = 0.1  # "circular enough" eccentricity to stop the burn
@@ -688,17 +701,19 @@ def gravity_turn(
         vessel.auto_pilot.target_direction = tuple(thrust_dir)
 
         # Auto-staging during burn
-        if vessel.available_thrust == 0 and vessel.control.current_stage > 0:
+        if available_thrust() == 0 and current_stage() > 0:
             separation_start = ut()
-            vessel.control.throttle = 0.0
+            throttle = 0.0
+            vessel.control.throttle = throttle
             vessel.control.activate_next_stage()
             print("\n  ⚡ STAGE SEPARATION")
             time.sleep(0.5)
-            if vessel.available_thrust == 0 and vessel.control.current_stage > 0:
+            if available_thrust() == 0 and current_stage() > 0:
                 vessel.control.activate_next_stage()
                 print("  ⚡ ENGINE IGNITION")
                 time.sleep(0.3)
-            vessel.control.throttle = 1.0
+            throttle = 1.0
+            vessel.control.throttle = throttle
             print(f"Staging took: {ut() - separation_start} sec")
 
         ecc = eccentricity()
@@ -707,7 +722,7 @@ def gravity_turn(
             apoapsis(),
             periapsis(),
             math.degrees(theta),
-            vessel.control.throttle,
+            throttle,
             speed(),
             "Circularizing",
             eccentricity=ecc,
