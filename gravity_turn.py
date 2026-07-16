@@ -345,6 +345,12 @@ class FlightSession:
 
     def __enter__(self) -> "FlightSession":
         self._vessel = self._wait_for_prelaunch(self.conn)
+        self._vessel.control.sas = False
+        self._vessel.control.rcs = False
+        self._vessel.auto_pilot.target_pitch_and_heading(90, 90)
+        self._vessel.auto_pilot.target_roll = 90
+        self.conn.space_center.physics_warp_factor = 0
+
         self._ready = True
         return self
 
@@ -393,6 +399,10 @@ class FlightSession:
         vessel = self._vessel
         if vessel is not None:
             self._try(lambda: setattr(vessel.control, "throttle", 0.0))
+            self._try(lambda: setattr(vessel.control, "sas", False))
+            self._try(lambda: setattr(vessel.control, "rcs", False))
+            self._try(lambda: setattr(vessel.auto_pilot, "target_roll", 90.0))
+            self._try(lambda: vessel.auto_pilot.target_pitch_and_heading(90, 90))
             self._try(vessel.auto_pilot.disengage)
         self._try(lambda: setattr(self.conn.space_center, "physics_warp_factor", 0))
 
