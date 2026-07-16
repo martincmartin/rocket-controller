@@ -530,9 +530,19 @@ def test_find_linear_tangent_params_converges(sim):
     assert np.dot(plan.plane.r_hat, plan.plane.w_hat) == pytest.approx(0.0, abs=1e-9)
 
     # Replay the burn through the public API to check the resulting orbit.
+    # Reconstruct the burn-start position/velocity the same way
+    # find_linear_tangent_params() does internally (coast from the
+    # original r3d/v3d up to plan.coast_time) -- CircularizationPlan no
+    # longer carries r_coast/v_coast itself.
+    plane = plan.plane
+    r0, v0 = to_rv(
+        sim.solve_coast(
+            (0, TIME_TO_APOAPSIS), plane.to_plane(R3D), plane.to_plane(V3D)
+        ).sol(plan.coast_time)
+    )
     result = sim.propagate_linear_tangent(
-        plan.r_coast,
-        plan.v_coast,
+        r0,
+        v0,
         plan.a_coeff,
         plan.b_coeff,
         plan.ref_angle,
@@ -844,35 +854,3 @@ def test_orbital_plane_to_plane_from_plane_roundtrip():
     v3d = plane.from_plane(v2d)
 
     np.testing.assert_allclose(plane.to_plane(v3d), v2d, atol=1e-6)
-
-
-def test_orbital_plane_to_angle_3d_matches_2d():
-    plane = OrbitalPlane(R3D, V3D)
-
-    v2d = vector(1.0, 1.0)
-    v3d = plane.from_plane(v2d)
-
-    assert plane.to_angle(v3d) == pytest.approx(plane.to_angle(v2d))
-    assert plane.to_angle(v2d) == pytest.approx(math.pi / 4)
-
-
-def test_orbital_plane_to_angle_matches_atan2_range():
-    plane = OrbitalPlane(R3D, V3D)
-
-    v2d = vector(1.0, -1.0)  # atan2 -> -pi/4
-    angle = plane.to_angle(v2d)
-
-    assert -math.pi < angle <= math.pi
-    assert angle == pytest.approx(-math.pi / 4)
-
-
-def test_orbital_plane_to_angle_zero_at_r_hat():
-    """By construction of OrbitalPlane, the position vector used to build
-    r_hat/w_hat lies entirely along r_hat, i.e. at angle ~0 (floating-point
-    noise in the (near-zero) w_hat component can push the raw atan2 result
-    to either side of 0, but no wraparound should occur)."""
-    plane = OrbitalPlane(R3D, V3D)
-    r0 = plane.to_plane(R3D)
-
-    for angle in (plane.to_angle(R3D), plane.to_angle(r0)):
-        assert angle == pytest.approx(0.0, abs=1e-9)

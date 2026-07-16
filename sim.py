@@ -255,15 +255,6 @@ class OrbitalPlane:
         """Expand a 2D (r_hat, w_hat) vector back into 3D."""
         return cast(Vector, v2d[0] * self.r_hat + v2d[1] * self.w_hat)
 
-    @_validate
-    def to_angle(self, v: Vector) -> float:
-        """Return the polar angle (radians, in (-pi, pi]) of `v` within this
-        plane. `v` may be a 3D vector (projected via `to_plane` first) or an
-        already-2D vector (e.g. the output of `to_plane`)."""
-        if v.shape[0] == 3:
-            v = self.to_plane(v)
-        return math.atan2(v[1], v[0])
-
 
 @dataclass
 class CircularizationPlan:
@@ -271,8 +262,6 @@ class CircularizationPlan:
     circularization burn."""
 
     plane: OrbitalPlane  # orbital-plane basis (r_hat, w_hat) at planning time
-    r_coast: Vector  # 2D position (plane coords) at coast_time (burn start)
-    v_coast: Vector  # 2D velocity (plane coords) at coast_time (burn start)
     a_coeff: float
     b_coeff: float
     burn_time: float
@@ -795,12 +784,8 @@ class Simulator:
             print(f"Optimizer success:   {res.success} ({res.message})")
             print(timer.summary())
 
-        r_coast, v_coast = to_rv(coast_fn(coast_time))
-
         return CircularizationPlan(
             plane=plane,
-            r_coast=r_coast,
-            v_coast=v_coast,
             a_coeff=float(a_coeff),
             b_coeff=float(b_coeff),
             burn_time=float(burn_time),

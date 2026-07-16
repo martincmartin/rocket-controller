@@ -633,23 +633,20 @@ def gravity_turn(
         r3d = np.array(position())
         v3d = np.array(velocity())
         tta = time_to_apoapsis()
+        ut0 = ut()  # pre-call snapshot -- see burn_start_time below
 
         # Replan on every iteration against the vessel's live state: fuel
         # burned, drag-induced orbital changes, and elapsed time all shift
         # the optimal (coast_time, a_coeff, b_coeff, burn_time) solution.
         sim = Simulator(mu, body_radius, TARGET_ALTITUDE, segments, STAGING_DURATION)
         plan = sim.find_linear_tangent_params(r3d, v3d, tta, verbose=False)
-        target_angle = plan.plane.to_angle(plan.r_coast)
-        current_angle = plan.plane.to_angle(r3d)
 
-        # Angular distance still to go until the (re-)planned burn start,
-        # wrapped to (-180°, 180°] so it stays well-behaved regardless of
-        # where to_angle()'s (-pi, pi] discontinuity falls.
-        angle_remaining = math.degrees(target_angle - current_angle)
-        if angle_remaining > 180.0:
-            angle_remaining -= 360.0
-        elif angle_remaining <= -180.0:
-            angle_remaining += 360.0
+        # plan.coast_time is "seconds from ut0 until the burn should
+        # start", not "seconds from now" -- find_linear_tangent_params()
+        # above can take 50 ms+, so anchor it to ut0 (read before the
+        # call) rather than a fresh ut() (read after), which would
+        # silently double-count however long the solve just took.
+        burn_start_time = plan.coast_time + ut0
 
         # Drop out of physics warp shortly before the burn so the autopilot
         # has full control authority to settle into the burn attitude.
@@ -665,7 +662,7 @@ def gravity_turn(
         vessel.auto_pilot.target_direction = tuple(initial_dir)
 
         print(
-            f"\r  Angle left {angle_remaining:>7.2f}°  Coast {plan.coast_time:>6.1f} s  "
+            f"\r  Coast {plan.coast_time:>6.1f} s  "
             f"a {plan.a_coeff:>8.5f}  b {plan.b_coeff:>9.6f}  "
             f"Burn {plan.burn_time:>6.1f} s  "
             f"Ap {apoapsis():>7.0f}/{plan.final_apoapsis_altitude:<7.0f} m  "
@@ -678,7 +675,7 @@ def gravity_turn(
             print()  # preserve the initial values in scrollback for comparison
             first_iteration = False
 
-        if angle_remaining <= 0.0:
+        if ut() >= burn_start_time:
             break
     print()
 
