@@ -607,9 +607,8 @@ def gravity_turn(
         # and reuse for the rest of this iteration: find_linear_tangent_
         # params() below can take 50 ms+, during which the streamed
         # values would otherwise advance past what the plan was based on.
-        with position.condition, velocity.condition:
-            r3d = np.array(position())
-            v3d = np.array(velocity())
+        r3d = np.array(position())
+        v3d = np.array(velocity())
         time_to_apoapsis = vessel.orbit.time_to_apoapsis
         segments = build_segments(vessel)
 
