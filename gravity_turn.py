@@ -13,16 +13,28 @@ vessel into the simulator's abstract RocketSegment model, requests an updated
 circularization plan as the trajectory evolves, and flies the resulting
 steering law in real time.
 
+`FlightSession` owns the live kRPC handles (the vessel and any streams
+opened against it) for a single flight attempt, and `run_campaign()` can
+run `gravity_turn()` multiple times in one script invocation -- reverting
+to launch between attempts -- to compare ascent parameters or characterize
+run-to-run variation. See PLAN.md for the design rationale.
+
 Tunable parameters are grouped at the top of main() for easy adjustment.
 """
 
 import math
 import time
+import traceback
+from dataclasses import dataclass
+from typing import Any, Callable, Optional
+
 import krpc
+import krpc.stream
 import numpy as np
 from collections import namedtuple
+from krpc.services.spacecenter import Vessel
 
-from sim import CircularizationPlan, RocketSegment, Simulator
+from sim import RocketSegment, Simulator
 
 # Standard gravitational acceleration (m/s²), used for Isp ↔ exhaust velocity.
 G0 = 9.80665
@@ -298,41 +310,150 @@ def resource_mass(vessel):
 STAGING_DURATION = 2.5  # seconds; measured real-world KSP staging delay
 
 
-def plan_circularization(
-    vessel, target_altitude: float, verbose: bool = True
-) -> CircularizationPlan:
-    """Plan a linear-tangent-steering circularization burn for *vessel*,
-    targeting a circular orbit at *target_altitude* meters.
+# ─── Flight Session ─────────────────────────────────────────────────────────────
 
-    If `verbose` is True (the default), prints the vessel's state and the
-    optimizer's diagnostic summary. Set to False to suppress this, e.g.
-    when calling this repeatedly in a tight loop.
+
+class FlightSession:
+    """One flight attempt's live kRPC handles: the active vessel, plus
+    every stream opened through this session.
+
+    Valid only strictly between __enter__() returning and __exit__()
+    running. Construction does no I/O and blocks on nothing --
+    __enter__() is what waits for a fresh, pre-launch vessel and hands it
+    out. `.vessel` and `.add_stream(...)` both raise immediately outside
+    that window (i.e. before entering, or after exiting), rather than
+    returning a stale or not-yet-ready handle.
+
+    Does NOT revert/load the game. That's the caller's decision, made
+    after the `with` block exits -- see `run_campaign()`.
     """
-    body = vessel.orbit.body
-    frame = body.non_rotating_reference_frame
 
-    # Position (m) and velocity (m/s), non-rotating reference frame.
-    r3d = np.array(vessel.position(frame))
-    v3d = np.array(vessel.velocity(frame))
-    mu = body.gravitational_parameter
-    body_radius = body.equatorial_radius
-    time_to_apoapsis = vessel.orbit.time_to_apoapsis
+    READY_TIMEOUT = 60.0
+    POLL_INTERVAL = 0.25
 
-    if verbose:
-        print(
-            f"{r3d=}, {v3d=}, {vessel.mass=}, mu={mu}, time to apoapsis={time_to_apoapsis}"
-        )
+    # `conn` is deliberately typed as `Any`, not `krpc.client.Client`: the
+    # vendored kRPC stub's own `Client.__init__` assigns `self.space_center`
+    # etc. from a try/except ImportError fallback (`lambda _: None`), so
+    # pyright infers those attributes as `X | None` and flags every
+    # `conn.space_center.foo` access below as "possibly None" -- a false
+    # positive from the stub's typing, not a real bug (see PLAN.md).
+    def __init__(self, conn: Any) -> None:
+        self.conn = conn
+        self._streams: list[krpc.stream.Stream] = []
+        self._ready = False  # True only strictly inside the `with` block
+        self._vessel: Optional[Vessel] = None
 
-    segments = build_segments(vessel)
-    sim = Simulator(mu, body_radius, target_altitude, segments, STAGING_DURATION)
+    def __enter__(self) -> "FlightSession":
+        self._vessel = self._wait_for_prelaunch(self.conn)
+        self._ready = True
+        return self
 
-    return sim.find_linear_tangent_params(r3d, v3d, time_to_apoapsis, verbose=verbose)
+    @property
+    def vessel(self) -> Vessel:
+        if not self._ready or self._vessel is None:
+            raise RuntimeError(
+                "FlightSession.vessel used outside an active session "
+                "(before __enter__ or after __exit__)"
+            )
+        return self._vessel
+
+    def add_stream(self, func: Callable[..., Any], *args: Any, **kwargs: Any) -> Any:
+        """Like conn.add_stream(...), but the returned stream is removed
+        automatically when this session closes.
+
+        Return type is deliberately `Any`, not `krpc.stream.Stream`: the
+        vendored kRPC stub's own `Stream.__call__` returns bare `object`
+        (not a generic/TypeVar), so a precisely-typed `Stream` here would
+        make every `some_stream()` read downstream (e.g. `altitude()`,
+        `position()`) infer as `object` and fail comparisons/arithmetic
+        against it -- a false positive from the stub's typing, not a real
+        bug (see PLAN.md).
+        """
+        if not self._ready:
+            raise RuntimeError(
+                "FlightSession.add_stream(...) used outside an active session "
+                "(before __enter__ or after __exit__)"
+            )
+        s = self.conn.add_stream(func, *args, **kwargs)
+        self._streams.append(s)
+        return s
+
+    def __exit__(self, exc_type, exc, tb) -> None:
+        self.close()
+        # No return value -- falsy, so an exception raised in the `with`
+        # body is never swallowed.
+
+    def close(self) -> None:
+        """Best-effort teardown: every step is attempted even if an
+        earlier one raised, so one failure (e.g. the vessel already being
+        gone) can't prevent the rest of cleanup."""
+        if not self._ready:
+            return
+
+        vessel = self._vessel
+        if vessel is not None:
+            self._try(lambda: setattr(vessel.control, "throttle", 0.0))
+            self._try(vessel.auto_pilot.disengage)
+        self._try(lambda: setattr(self.conn.space_center, "physics_warp_factor", 0))
+
+        for s in self._streams:
+            self._try(s.remove)
+        self._streams.clear()
+
+        self._vessel = None
+        self._ready = False
+
+    @staticmethod
+    def _try(action: Callable[[], Any]) -> None:
+        try:
+            action()
+        except Exception as e:  # noqa: BLE001 - teardown must not raise
+            print(f"  ! FlightSession cleanup warning: {e}")
+
+    @classmethod
+    def _wait_for_prelaunch(cls, conn: Any) -> Vessel:
+        """Poll until a vessel exists, in the flight scene, sitting on
+        the pad. Needed because revert_to_launch()/load() return before
+        the scene has actually finished reloading."""
+        deadline = time.monotonic() + cls.READY_TIMEOUT
+        pre_launch = conn.space_center.VesselSituation.pre_launch
+        flight_scene = conn.krpc.GameScene.flight
+        while True:
+            try:
+                # current_game_scene is a coarse, cheap guard against
+                # reading a stale/leftover active_vessel while the scene
+                # itself is still transitioning (e.g. mid-load()).
+                if conn.krpc.current_game_scene == flight_scene:
+                    vessel = conn.space_center.active_vessel
+                    if vessel.situation == pre_launch:
+                        return vessel
+            except Exception:
+                pass  # scene mid-transition; retry until the timeout
+            if time.monotonic() >= deadline:
+                raise TimeoutError(
+                    "Timed out waiting for the vessel to reach pre-launch"
+                )
+            time.sleep(cls.POLL_INTERVAL)
+
+
+@dataclass
+class FlightResult:
+    """Outcome of one gravity_turn() attempt."""
+
+    turn_start_alt: float
+    turn_end_alt: float
+    final_apoapsis: float
+    final_periapsis: float
+    final_mass: float
+    error: str | None = None
 
 
 # Main gravity turn implementation.
 # TURN_START_ALT = 100  # Altitude to begin pitching over (m)
 # TURN_END_ALT = 35_000  # Altitude at which pitch reaches 0° (horizontal)
-def gravity_turn(conn, turn_start_alt, turn_end_alt):
+def gravity_turn(
+    fs: FlightSession, turn_start_alt: float, turn_end_alt: float
+) -> FlightResult:
     # ── Tunable Parameters ──────────────────────────────────────────────────
     TARGET_ALTITUDE = 80_000  # Desired circular orbit altitude (m)
     ENGINE_CUTOFF_ALTITUDE = 60_000  # Once apopasis reaches this, cut engines.
@@ -345,7 +466,8 @@ def gravity_turn(conn, turn_start_alt, turn_end_alt):
     AP_THROTTLE_MARGIN = 0.95  # Start tapering throttle when Ap > this × target
     ATMOSPHERE_ALTITUDE = 25_000  # Kerbin atmosphere is 0.01 atm at 25k, 0.001 at 40k.
 
-    vessel = conn.space_center.active_vessel
+    conn = fs.conn
+    vessel = fs.vessel
     print(f"  Vessel: {vessel.name}")
 
     mass = resource_mass(vessel)
@@ -355,19 +477,24 @@ def gravity_turn(conn, turn_start_alt, turn_end_alt):
     body = vessel.orbit.body
     body_radius = body.equatorial_radius
     mu = body.gravitational_parameter
+    frame = body.non_rotating_reference_frame
     print(f"  Body: {body.name}  (R = {body_radius:.0f} m, μ = {mu:.3e} m³/s²)")
 
     # ── Telemetry Streams ───────────────────────────────────────────────────
     # Streams are much faster than polling properties repeatedly.
-    ut = conn.add_stream(getattr, conn.space_center, "ut")
-    altitude = conn.add_stream(getattr, vessel.flight(), "mean_altitude")
-    apoapsis = conn.add_stream(getattr, vessel.orbit, "apoapsis_altitude")
-    periapsis = conn.add_stream(getattr, vessel.orbit, "periapsis_altitude")
-    eccentricity = conn.add_stream(getattr, vessel.orbit, "eccentricity")
-    speed = conn.add_stream(
+    ut = fs.add_stream(getattr, conn.space_center, "ut")
+    altitude = fs.add_stream(getattr, vessel.flight(), "mean_altitude")
+    apoapsis = fs.add_stream(getattr, vessel.orbit, "apoapsis_altitude")
+    periapsis = fs.add_stream(getattr, vessel.orbit, "periapsis_altitude")
+    eccentricity = fs.add_stream(getattr, vessel.orbit, "eccentricity")
+    speed = fs.add_stream(
         getattr, vessel.flight(vessel.orbit.body.reference_frame), "speed"
     )
-    stage_fuel = None  # set up after first staging event
+    # Used by the Coast & Replan loop below. Streamed (rather than the
+    # blocking vessel.position(frame)/vessel.velocity(frame) calls) so
+    # repeated reads don't each cost a network round trip.
+    position = fs.add_stream(vessel.position, frame)
+    velocity = fs.add_stream(vessel.velocity, frame)
 
     # ── Pre-Launch Setup ────────────────────────────────────────────────────
     vessel.control.sas = False
@@ -465,7 +592,6 @@ def gravity_turn(conn, turn_start_alt, turn_end_alt):
     # ═══════════════════════════════════════════════════════════════════════
     print("\n── Coast & Replan to Burn Start ──")
 
-    frame = body.non_rotating_reference_frame
     vessel.auto_pilot.reference_frame = frame
     vessel.auto_pilot.stopping_time = (
         2,
@@ -475,14 +601,25 @@ def gravity_turn(conn, turn_start_alt, turn_end_alt):
 
     first_iteration = True
     while True:
+        # Snapshot position/velocity once per iteration, under both
+        # streams' condition locks so they're guaranteed to come from the
+        # same physics tick as each other (see PLAN.md §2.4). Read once
+        # and reuse for the rest of this iteration: find_linear_tangent_
+        # params() below can take 50 ms+, during which the streamed
+        # values would otherwise advance past what the plan was based on.
+        with position.condition, velocity.condition:
+            r3d = np.array(position())
+            v3d = np.array(velocity())
+        time_to_apoapsis = vessel.orbit.time_to_apoapsis
+        segments = build_segments(vessel)
+
         # Replan on every iteration against the vessel's live state: fuel
         # burned, drag-induced orbital changes, and elapsed time all shift
         # the optimal (coast_time, a_coeff, b_coeff, burn_time) solution.
-        plan = plan_circularization(vessel, TARGET_ALTITUDE, verbose=False)
+        sim = Simulator(mu, body_radius, TARGET_ALTITUDE, segments, STAGING_DURATION)
+        plan = sim.find_linear_tangent_params(r3d, v3d, time_to_apoapsis, verbose=False)
         target_angle = plan.plane.to_angle(plan.r_coast)
-
-        pos = np.array(vessel.position(frame))
-        current_angle = plan.plane.to_angle(pos)
+        current_angle = plan.plane.to_angle(r3d)
 
         # Angular distance still to go until the (re-)planned burn start,
         # wrapped to (-180°, 180°] so it stays well-behaved regardless of
@@ -600,7 +737,78 @@ def gravity_turn(conn, turn_start_alt, turn_end_alt):
     print(
         f"Remaining resource mass: {final_mass} kg, used mass: {mass - final_mass} kg"
     )
-    return final_mass
+
+    return FlightResult(
+        turn_start_alt=turn_start_alt,
+        turn_end_alt=turn_end_alt,
+        final_apoapsis=final_ap,
+        final_periapsis=final_pe,
+        final_mass=final_mass,
+    )
+
+
+# ─── Multi-run harness ──────────────────────────────────────────────────────────
+
+
+def _run_one_attempt(conn: Any, params: dict[str, Any]) -> FlightResult:
+    """Run a single gravity_turn() attempt, converting any exception into
+    a FlightResult(error=...) instead of letting it escape. This is the
+    one place a per-attempt flight-logic failure is caught -- see
+    run_campaign()'s docstring for why that's different from a
+    harness-plumbing failure."""
+    try:
+        # FlightSession(conn) itself is side-effect-free; entering the
+        # `with` block is what waits for pre-launch, so the wait is
+        # inside the try along with the flight itself.
+        with FlightSession(conn) as fs:
+            return gravity_turn(fs, **params)
+    except Exception as e:
+        traceback.print_exc()
+        return FlightResult(
+            turn_start_alt=params["turn_start_alt"],
+            turn_end_alt=params["turn_end_alt"],
+            final_apoapsis=math.nan,
+            final_periapsis=math.nan,
+            final_mass=math.nan,
+            error=str(e),
+        )
+
+
+def run_campaign(
+    conn: Any,
+    param_sets: list[dict[str, Any]],
+    revert_after_last: bool = False,
+) -> list[FlightResult]:
+    """Run gravity_turn() once per entry in param_sets, reverting to
+    launch between attempts.
+
+    A failing attempt (an exception raised anywhere in that attempt's
+    FlightSession/gravity_turn() call) is caught, recorded as a
+    FlightResult(error=...), and the sweep continues. Failing to revert
+    (or the game reporting it can't) aborts the remaining sweep instead --
+    that's a harness-plumbing failure rather than a flight-logic failure,
+    and silently continuing after it would mean re-flying an
+    already-flown vessel and mislabeling the result as a fresh attempt.
+
+    `revert_after_last` controls whether the *final* attempt is reverted
+    too. Default False, so a single run (or the last run of a sweep)
+    simply leaves the vessel wherever it ended up -- e.g. in orbit -- and
+    the script can just exit without touching the save.
+    """
+    results: list[FlightResult] = []
+
+    for i, params in enumerate(param_sets):
+        is_last = i == len(param_sets) - 1
+        results.append(_run_one_attempt(conn, params))
+
+        if not is_last or revert_after_last:
+            if not conn.space_center.can_revert_to_launch():
+                raise RuntimeError(
+                    "Cannot revert to launch; aborting the remaining sweep"
+                )
+            conn.space_center.revert_to_launch()
+
+    return results
 
 
 # ─── Main ───────────────────────────────────────────────────────────────────────
@@ -611,7 +819,12 @@ def main():
     print("Connecting to kRPC server…")
     conn = krpc.connect(name="Gravity Turn")
 
-    gravity_turn(conn, 100, 30_000)
+    results = run_campaign(
+        conn,
+        [dict(turn_start_alt=100, turn_end_alt=30_000)],
+    )
+    for result in results:
+        print(result)
 
     conn.close()
 
