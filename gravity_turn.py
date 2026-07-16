@@ -25,13 +25,14 @@ Tunable parameters are grouped at the top of main() for easy adjustment.
 import math
 import time
 import traceback
+from collections import namedtuple
+from collections.abc import Callable
 from dataclasses import dataclass
-from typing import Any, Callable, Optional
+from typing import Any
 
 import krpc
 import krpc.stream
 import numpy as np
-from collections import namedtuple
 from krpc.services.spacecenter import Vessel
 
 from sim import RocketSegment, Simulator
@@ -71,7 +72,7 @@ def clamp(value: float, lo: float, hi: float) -> float:
 class EngineGroup:
     """Snapshot of an engine group's performance and remaining fuel."""
 
-    __slots__ = ("name", "thrust", "flow_rate", "fuel_duration")
+    __slots__ = ("flow_rate", "fuel_duration", "name", "thrust")
 
     def __init__(self, name, thrust, flow_rate, fuel_duration):
         self.name = name  # representative engine's part.title
@@ -167,7 +168,7 @@ def _discover_engine_groups(vessel, active_only=True, stage_filter=None):
         by_key.setdefault(key, []).append(engine)
 
     groups = []
-    for _key, eng_list in by_key.items():
+    for eng_list in by_key.values():
         stats = _engine_group_stats(eng_list)
         if stats is not None:
             groups.append(stats)
@@ -266,7 +267,7 @@ def build_segments(vessel) -> list[RocketSegment]:
 
         mass_consumed = total_flow * min_dur
         if mass_consumed >= m:
-            print(f"!!! WTF????")
+            print("!!! WTF????")
             break
         m -= mass_consumed
 
@@ -341,7 +342,7 @@ class FlightSession:
         self.conn = conn
         self._streams: list[krpc.stream.Stream] = []
         self._ready = False  # True only strictly inside the `with` block
-        self._vessel: Optional[Vessel] = None
+        self._vessel: Vessel | None = None
 
     def __enter__(self) -> "FlightSession":
         self._vessel = self._wait_for_prelaunch(self.conn)
@@ -417,7 +418,7 @@ class FlightSession:
     def _try(action: Callable[[], Any]) -> None:
         try:
             action()
-        except Exception as e:  # noqa: BLE001 - teardown must not raise
+        except Exception as e:
             print(f"  ! FlightSession cleanup warning: {e}")
 
     @classmethod
@@ -469,9 +470,9 @@ def gravity_turn(
     ENGINE_CUTOFF_ALTITUDE = 60_000  # Once apopasis reaches this, cut engines.
     HEADING = 90  # Launch azimuth (90 = due east for equatorial orbit)
     # MAX_Q_THROTTLE = 0.75  # Throttle limit during max-Q region
-    MAX_Q_THROTTLE = 1.0  # Throttle limit during max-Q region
-    MAX_Q_LOW = 10_000  # Start of max-Q throttle-down band (m)
-    MAX_Q_HIGH = 30_000  # End of max-Q throttle-down band (m)
+    # MAX_Q_THROTTLE = 1.0  # Throttle limit during max-Q region
+    # MAX_Q_LOW = 10_000  # Start of max-Q throttle-down band (m)
+    # MAX_Q_HIGH = 30_000  # End of max-Q throttle-down band (m)
     AP_WARP_MARGIN = 0.90  # Turn off warp when Ap > this x target
     AP_THROTTLE_MARGIN = 0.95  # Start tapering throttle when Ap > this × target
     ATMOSPHERE_ALTITUDE = 25_000  # Kerbin atmosphere is 0.01 atm at 25k, 0.001 at 40k.
@@ -597,7 +598,8 @@ def gravity_turn(
     vessel.control.throttle = 0.0
     conn.space_center.physics_warp_factor = 3  # 4× physics warp during coast
     print(
-        f"\n  ✓ Target apoapsis reached: {apoapsis():.0f} m, waiting until out of atmosphere."
+        f"\n  ✓ Target apoapsis reached: {apoapsis():.0f} m, "
+        "waiting until out of atmosphere."
     )
 
     # Wait for solid boosters to burn out, and to be (mostly) out of the atmosphere
@@ -735,7 +737,7 @@ def gravity_turn(
         prev_ecc = ecc
 
     vessel.control.throttle = 0.0
-    print(f"\n  ✓ Circularization complete!")
+    print("\n  ✓ Circularization complete!")
 
     # ── Final Orbit Summary ─────────────────────────────────────────────
     time.sleep(1)
@@ -842,7 +844,7 @@ def main():
 
     results = run_campaign(
         conn,
-        [dict(turn_start_alt=100, turn_end_alt=30_000)],
+        [{"turn_start_alt": 100, "turn_end_alt": 30_000}],
     )
     for result in results:
         print(result)

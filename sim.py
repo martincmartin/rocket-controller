@@ -29,19 +29,18 @@ import math
 import resource
 import sys
 import time
-from collections.abc import Callable
 from dataclasses import dataclass
-from typing import Any, Optional, cast
+from typing import Any, ClassVar, cast
 
 import numpy as np
 from numpy.typing import NDArray
-
-# Type alias for float64 arrays
-Vector = NDArray[np.float64]
 from pydantic import ConfigDict, validate_call
 from scipy.integrate import solve_ivp
 from scipy.integrate._ivp.ivp import OdeResult
 from scipy.optimize import NonlinearConstraint, minimize
+
+# Type alias for float64 arrays
+Vector = NDArray[np.float64]
 
 _validate = validate_call(config=ConfigDict(arbitrary_types_allowed=True))
 
@@ -82,7 +81,7 @@ class TimingContext:
 
         # Internal state
         self._start_wall: float = 0.0
-        self._start_rusage: Optional[resource.struct_rusage] = None
+        self._start_rusage: resource.struct_rusage | None = None
 
     def __enter__(self) -> "TimingContext":
         """Start timing."""
@@ -387,10 +386,7 @@ def orbital_elements(r: Vector, v: Vector, mu: float) -> OrbitalElements:
     e = np.linalg.norm(e_vec)
 
     # Semi-major axis
-    if np.isclose(energy, 0.0):
-        a = np.inf
-    else:
-        a = -mu / (2 * energy)
+    a = np.inf if np.isclose(energy, 0.0) else -mu / (2 * energy)
 
     # Periapsis / apoapsis
     if e < 1.0:
@@ -415,7 +411,7 @@ def orbital_elements(r: Vector, v: Vector, mu: float) -> OrbitalElements:
 class Simulator:
     """Orbital simulation."""
 
-    ATOL_THRUST_VECTOR = [
+    ATOL_THRUST_VECTOR: ClassVar[list[float]] = [
         1.0,  # Position within 1 meter.
         1.0,
         0.001,  # Velocity within 0.001 meters / sec
@@ -423,7 +419,7 @@ class Simulator:
         0.1,  # Mass within 100 grams
     ]
 
-    ATOL_COAST_VECTOR = ATOL_THRUST_VECTOR[:-1]
+    ATOL_COAST_VECTOR: ClassVar[list[float]] = ATOL_THRUST_VECTOR[:-1]
 
     @_validate
     def __init__(
@@ -593,7 +589,6 @@ class Simulator:
                 remaining -= staging_duration
 
                 if remaining <= 0:
-                    state = np.array([r[0], r[1], v[0], v[1], mass])
                     return BurnResult(r, v, mass)
 
         # Ran out of segments before using all of the requested burn time.
@@ -713,7 +708,7 @@ class Simulator:
                 max(time_to_apoapsis - burn_time_guess / 2, 0.0), time_to_apoapsis
             )
 
-            @functools.lru_cache(maxsize=None)
+            @functools.cache
             def simulate(params_tuple: tuple[float, ...]) -> BurnResult:
                 """Coast to coast_time, then burn for burn_time under the
                 linear-tangent steering law.  Memoized so the objective and
@@ -778,7 +773,8 @@ class Simulator:
             print(f"Apoapsis:            {ap_alt:8.2f} m")
             print(f"Periapsis:           {pe_alt:8.2f} m")
             print(
-                f"Velocity residual:  ({eq_residual[0]:8.4f}, {eq_residual[1]:8.4f}) m/s"
+                f"Velocity residual:  ({eq_residual[0]:8.4f}, "
+                f"{eq_residual[1]:8.4f}) m/s"
             )
             print(f"Radius residual:     {ineq_residual[0]:8.2f} m")
             print(f"Optimizer success:   {res.success} ({res.message})")
@@ -814,7 +810,8 @@ def main() -> None:
         TERRIER = RocketSegment(
             "Terrier",
             ve=345 * 9.80665,  # m / sec
-            thrust=60_000.0,  # Newtons = kg m / sec^2, flow_rate=17.7341950083118 kg/sec
+            # Newtons = kg m / sec^2, flow_rate=17.7341950083118 kg/sec
+            thrust=60_000.0,
             max_burn_time=112.77647255563578,
             initial_mass=4450.0,  # 2450 mass after burn?
             last_segment_of_stage=True,

@@ -6,8 +6,6 @@ from dataclasses import dataclass
 import numpy as np
 import pytest
 
-pytestmark = pytest.mark.filterwarnings("error::RuntimeWarning")
-
 from sim import (
     CircularizationPlan,
     OrbitalPlane,
@@ -17,6 +15,8 @@ from sim import (
     to_rv,
     to_rvm,
 )
+
+pytestmark = pytest.mark.filterwarnings("error::RuntimeWarning")
 
 KERBIN_RADIUS = 600_000
 MU = 3.5316e12  # Kerbin

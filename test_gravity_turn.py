@@ -8,7 +8,6 @@ import pytest
 
 from gravity_turn import FlightSession
 
-
 # ─── FlightSession ────────────────────────────────────────────────────────────
 #
 # A minimal fake kRPC connection, just enough to exercise FlightSession's
@@ -137,12 +136,19 @@ def test_normal_exit_resets_throttle_autopilot_and_warp(conn):
 
 
 def test_exceptional_exit_still_cleans_up_and_propagates(conn):
-    with pytest.raises(ValueError, match="boom"):
+    # Wrapped in a helper so pytest.raises(...) itself contains a single
+    # statement (PT012) -- the exception still has to be raised *inside*
+    # the `with FlightSession(...)` block, and propagate through its
+    # __exit__, for this test to actually exercise what it's named for.
+    def enter_add_stream_and_raise() -> None:
         with FlightSession(conn) as fs:
-            s1 = fs.add_stream(lambda: 1)
+            fs.add_stream(lambda: 1)
             raise ValueError("boom")
 
-    assert s1.removed
+    with pytest.raises(ValueError, match="boom"):
+        enter_add_stream_and_raise()
+
+    assert conn.removed_stream_names == ["stream-1"]
 
 
 def test_vessel_raises_before_enter_and_after_exit(conn):

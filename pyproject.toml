@@ -1,0 +1,14 @@
+[tool.ruff.lint]
+# Enable Pyflakes (F: unused imports/variables, undefined names, etc.),
+# Pycodestyle (E, W: PEP 8 errors and warnings, e.g. line length),
+# Isort (I: import sorting/grouping), Bugbear (B: likely bugs and
+# design problems, e.g. mutable default arguments), NumPy-specific rules
+# (NPY: deprecated/legacy NumPy APIs), Pyupgrade (UP: modernize syntax
+# for the targeted Python version), flake8-comprehensions (C4: unneeded
+# list/dict/set comprehension or literal patterns), flake8-simplify
+# (SIM: simplifiable/redundant code, e.g. if/else that could be a
+# ternary), flake8-pytest-style (PT: consistent pytest idioms, e.g.
+# raises() blocks), Perflint (PERF: common performance footguns), and
+# Ruff's own additional rules (RUF).
+select = ["E", "W", "F", "I", "B", "NPY", "UP", "C4", "SIM", "PT", "PERF", "RUF"]
+ignore = ["RUF003"]  # flags intentional Unicode (×, µ, °, ──) in comments/strings

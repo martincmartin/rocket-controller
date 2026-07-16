@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 
-import math
 import time
+
 import krpc
 
 
@@ -61,11 +61,13 @@ while True:
     print_fuel(vessel)
     print("")
     for e in vessel.parts.engines:
-        print(
-            f"{e.part.title}, {e.active=}, {e.max_vacuum_thrust=}, mass_rate={e.thrust / (e.specific_impulse * G0)}"
-        )
+        mass_rate = e.thrust / (e.specific_impulse * G0)
+        print(f"{e.part.title}, {e.active=}, {e.max_vacuum_thrust=}, {mass_rate=}")
         for p in e.propellants:
             print(
-                f"  {p.name}, {p.current_amount=}, {p.current_requirement=}, {p.total_resource_available=}, {p.total_resource_capacity=}, {p.ignore_for_isp=}, {p.ignore_for_thrust_curve=}, {p.draw_stack_gauge=}, {p.is_deprived=}, {p.ratio=}"
+                f"  {p.name}, {p.current_amount=}, {p.current_requirement=}, "
+                f"{p.total_resource_available=}, {p.total_resource_capacity=}, "
+                f"{p.ignore_for_isp=}, {p.ignore_for_thrust_curve=}, "
+                f"{p.draw_stack_gauge=}, {p.is_deprived=}, {p.ratio=}"
             )
     time.sleep(0.5)
