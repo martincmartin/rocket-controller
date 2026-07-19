@@ -603,7 +603,7 @@ def gravity_turn(
             throttle = clamp(remaining_frac, 0.05, 1.0)
         else:
             throttle = 1.0
-        vessel.control.throttle = throttle
+            vessel.control.throttle = throttle
 
         if ap > ENGINE_CUTOFF_ALTITUDE * AP_WARP_MARGIN:
             conn.space_center.physics_warp_factor = 0  # 1× physics warp when close.
@@ -659,6 +659,13 @@ def gravity_turn(
     # angular velocity of the vessel."  Sounds like it's related to the damping
     # in the PID controller?
     vessel.auto_pilot.stopping_time = (2, 2, 2)
+
+    # Will we get more accurate thrust direction vector if we only use reaction
+    # wheel for direction, not gimballing?  Let's find out.
+    for e in vessel.parts.engines:
+        if e.active and e.has_fuel:
+            print(f"Locking gimbal on {e.part.title}")
+            e.gimbal_locked = True
 
     # Engine/fuel state doesn't change while coasting (no thrust, no
     # staging), so this is computed once here rather than re-derived
@@ -720,13 +727,26 @@ def gravity_turn(
         # Drop out of physics warp shortly before the burn so the autopilot
         # has full control authority to settle into the burn attitude.
         if plan.coast_time <= 5.0:
+            # At 1x warp we can have a stiffer hand on the tiller.
             conn.space_center.physics_warp_factor = 0
-            # At 1x warp we can have a stiffer hand on the tiller.  "This
-            # determines the maximum angular velocity of the vessel."  So it
-            # sounds like a damping parameter?
+
+            # Auto pilot parameters!
+            # https://krpc.github.io/krpc/0.5.4/tutorials/autopilot.html
+
+            # "In order to avoid overshoot, the stopping time should be smaller
+            # than the deceleration time."
+
+            # For Swivel, these settings cause yaw and pitch controls to jiggle
+            # around like crazy, and the rocket visibly oscillates.  *sigh*.
+            # They work really well for Terrier though.
+
+            # This determines the maximum angular velocity of the vessel."  So
+            # it sounds like a damping parameter?
             vessel.auto_pilot.stopping_time = (0.5, 0.5, 0.5)
+
             # Let's try to target the angle more precisely. Default is 1 degree.
-            vessel.auto_pilot.attenuation_angle = (0.5, 0.5, 0.5)
+            # vessel.auto_pilot.attenuation_angle = (0.5, 0.5, 0.5)
+
             # Could also consider deceleration_time.  "This determines the
             # angular acceleration used to decelerate the vessel."  So the
             # proportional term of a PID controller?
@@ -755,7 +775,7 @@ def gravity_turn(
 
         if ut() >= burn_start_time:
             break
-    print()
+        print()
 
     # ═══════════════════════════════════════════════════════════════════════
     #  Circularization Burn
@@ -790,17 +810,14 @@ def gravity_turn(
                     "vy",
                     "vz",
                     "mass",
-                    "thrust_x",
-                    "thrust_y",
-                    "thrust_z",
                     "intended_thrust_dir_r",
                     "intended_thrust_dir_w",
                     "intended_thrust_dir_x",
                     "intended_thrust_dir_y",
                     "intended_thrust_dir_z",
-                    "actual_thrust_dir_x",
-                    "actual_thrust_dir_y",
-                    "actual_thrust_dir_z",
+                    "actual_thrust_x",
+                    "actual_thrust_y",
+                    "actual_thrust_z",
                 ]
             )
 
@@ -827,7 +844,7 @@ def gravity_turn(
                 else:
                     thrust_unit = thrust_unit_stream()
 
-            actual_thrust_dir = thrust_now * np.array(thrust_unit)
+            actual_thrust = thrust_now * np.array(thrust_unit)
 
             t = ut_now - burn_start_ut
             theta = plan.ref_angle + math.atan(plan.a_coeff + plan.b_coeff * t)
@@ -837,10 +854,10 @@ def gravity_turn(
 
             angle = math.degrees(np.arccos(np.dot(thrust_unit, thrust_dir)))
 
-            print(
-                f"\n{thrust_unit=}, {thrust_dir=}, {angle=} "
-                f"error={vessel.auto_pilot.error}"
-            )
+            # print(
+            #     f"\n{thrust_unit=}, {thrust_dir=}, {angle=} "
+            #     f"error={vessel.auto_pilot.error}"
+            # )
 
             if csv_writer is not None:
                 csv_writer.writerow(
@@ -859,9 +876,9 @@ def gravity_turn(
                         thrust_dir[0],
                         thrust_dir[1],
                         thrust_dir[2],
-                        actual_thrust_dir[0],
-                        actual_thrust_dir[1],
-                        actual_thrust_dir[2],
+                        actual_thrust[0],
+                        actual_thrust[1],
+                        actual_thrust[2],
                     ]
                 )
 
@@ -877,9 +894,9 @@ def gravity_turn(
                     vessel.control.activate_next_stage()
                     print("  ⚡ ENGINE IGNITION")
                     time.sleep(0.3)
-                throttle = 1.0
-                vessel.control.throttle = throttle
-                print(f"Staging took: {ut() - separation_start} sec")
+                    throttle = 1.0
+                    vessel.control.throttle = throttle
+                    print(f"Staging took: {ut() - separation_start} sec")
                 if TIMESERIES_LOGGING:
                     engine_part = _active_engine_part(vessel)
                     thrust_unit_stream = conn.add_stream(
@@ -921,7 +938,7 @@ def gravity_turn(
             else:
                 with ut.condition:
                     ut.wait()
-                ut_end = ut()
+                    ut_end = ut()
                 if not math.isclose(ut_end - ut_now, 0.02):
                     print(f"Waited! Time changed by {ut() - ut_now}")
 
