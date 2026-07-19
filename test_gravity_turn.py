@@ -37,6 +37,8 @@ class FakeAutoPilot:
         self.target_roll = 0.0
         self.target_pitch = None
         self.target_heading = None
+        self.stopping_time = None
+        self.reference_frame = None
 
     def disengage(self) -> None:
         self.disengaged = True
@@ -58,6 +60,7 @@ class FakeVessel:
         self.situation = "pre_launch"
         self.control = FakeControl()
         self.auto_pilot = FakeAutoPilot()
+        self.surface_reference_frame = object()  # unique sentinel
 
 
 class FakeVesselSituation:
@@ -103,6 +106,12 @@ def conn() -> FakeConn:
 def test_enter_waits_for_prelaunch_and_returns_self(conn):
     with FlightSession(conn) as fs:
         assert fs.vessel is conn.space_center.active_vessel
+
+
+def test_enter_sets_autopilot_reference_frame(conn):
+    vessel = conn.space_center.active_vessel
+    with FlightSession(conn):
+        assert vessel.auto_pilot.reference_frame is vessel.surface_reference_frame
 
 
 def test_normal_exit_removes_every_stream(conn):

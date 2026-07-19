@@ -22,6 +22,8 @@ run-to-run variation. See PLAN.md for the design rationale.
 Tunable parameters are grouped at the top of main() for easy adjustment.
 """
 
+import contextlib
+import csv
 import math
 import time
 import traceback
@@ -35,7 +37,12 @@ import krpc.stream
 import numpy as np
 from krpc.services.spacecenter import Vessel
 
-from sim import RocketSegment, Simulator
+from sim import (
+    TIMESERIES_LOGGING,
+    RocketSegment,
+    Simulator,
+    write_circularization_debug_csv,
+)
 
 # Standard gravitational acceleration (m/s²), used for Isp ↔ exhaust velocity.
 G0 = 9.80665
@@ -308,6 +315,24 @@ def resource_mass(vessel):
     return sum(r.amount * r.density for r in vessel.resources.all)
 
 
+def _active_engine_part(vessel):
+    """Return the Part of the single engine currently active and
+    carrying fuel.
+
+    Used to reconstruct the 3D thrust vector for debug logging (see
+    PLAN.md §2.2): the assumption is that at any moment during the
+    circularization burn, exactly one engine still has fuel. Hard-fails
+    (via assert) if that assumption doesn't hold, rather than silently
+    picking one -- a violation means the logged thrust vector would be
+    wrong/ambiguous.
+    """
+    active = [e for e in vessel.parts.engines if e.active and e.has_fuel]
+    assert len(active) == 1, (
+        f"expected exactly one active fueled engine, got {len(active)}"
+    )
+    return active[0].part
+
+
 STAGING_DURATION = 2.5  # seconds; measured real-world KSP staging delay
 
 
@@ -348,8 +373,12 @@ class FlightSession:
         self._vessel = self._wait_for_prelaunch(self.conn)
         self._vessel.control.sas = False
         self._vessel.control.rcs = False
+
+        self._vessel.auto_pilot.stopping_time = (0.5, 0.5, 0.5)
+        self._vessel.auto_pilot.reference_frame = self._vessel.surface_reference_frame
         self._vessel.auto_pilot.target_pitch_and_heading(90, 90)
         self._vessel.auto_pilot.target_roll = 90
+
         self.conn.space_center.physics_warp_factor = 0
 
         self._ready = True
@@ -513,6 +542,10 @@ def gravity_turn(
     current_stage = fs.add_stream(getattr, vessel.control, "current_stage")
     thrust = fs.add_stream(getattr, vessel, "thrust")
     time_to_apoapsis = fs.add_stream(getattr, vessel.orbit, "time_to_apoapsis")
+    # Only used for circularization-burn debug logging (see PLAN.md §2.1).
+    mass_stream = fs.add_stream(getattr, vessel, "mass")
+
+    current_stage.start()
 
     # ── Pre-Launch Setup ────────────────────────────────────────────────────
     vessel.control.sas = False
@@ -531,6 +564,8 @@ def gravity_turn(
     print("\n── Ascent & Gravity Turn ──")
     conn.space_center.physics_warp_factor = 1  # 2× physics warp during ascent
     turn_angle = 0.0
+
+    print(f"Auto tuning the auto pilot PID parameters? {vessel.auto_pilot.auto_tune}")
 
     while True:
         alt = altitude()
@@ -586,7 +621,15 @@ def gravity_turn(
                 time.sleep(0.3)
 
         # ── Telemetry ───────────────────────────────────────────────────
-        print_telemetry(alt, ap, periapsis(), turn_angle, throttle, speed(), phase)
+        print_telemetry(
+            alt,
+            ap,
+            periapsis(),
+            turn_angle,
+            throttle,
+            speed(),
+            phase,
+        )
 
         # ── Exit condition: apoapsis reached ────────────────────────────
         if ap >= ENGINE_CUTOFF_ALTITUDE:
@@ -612,17 +655,41 @@ def gravity_turn(
     print("\n── Coast & Replan to Burn Start ──")
 
     vessel.auto_pilot.reference_frame = frame
-    vessel.auto_pilot.stopping_time = (
-        2,
-        2,
-        2,
-    )  # gentler corrections to avoid oscillation
+    # gentler corrections to avoid oscillation "This determines tie maximum
+    # angular velocity of the vessel."  Sounds like it's related to the damping
+    # in the PID controller?
+    vessel.auto_pilot.stopping_time = (2, 2, 2)
 
     # Engine/fuel state doesn't change while coasting (no thrust, no
     # staging), so this is computed once here rather than re-derived
     # (many blocking per-engine/per-part round trips) on every iteration
     # of the loop below.
     segments = build_segments(vessel)
+
+    # Debug logging (see PLAN.md §2): only used to compare the live burn
+    # against the optimizer's predicted trajectory, gated by
+    # TIMESERIES_LOGGING. `csv_file` is None (via nullcontext) when
+    # logging is off, so no file is opened and no extra kRPC calls (e.g.
+    # transform_direction below) are made.
+    if TIMESERIES_LOGGING:
+        engine_part = _active_engine_part(vessel)
+
+        local_thrust_direction = (0, +1, 0)
+        thrust_unit_stream = conn.add_stream(
+            conn.space_center.transform_direction,
+            local_thrust_direction,
+            engine_part.reference_frame,
+            frame,
+        )
+        thrust_unit_stream.start()
+    else:
+        engine_part = None
+
+    # Make sure these streams have started.
+    # print(f"{vessel.control.current_stage=}", flush=True)
+    print(f"{current_stage()=}", flush=True)
+    mass_stream()
+    thrust()
 
     first_iteration = True
     while True:
@@ -652,8 +719,17 @@ def gravity_turn(
 
         # Drop out of physics warp shortly before the burn so the autopilot
         # has full control authority to settle into the burn attitude.
-        if plan.coast_time <= 10.0:
+        if plan.coast_time <= 5.0:
             conn.space_center.physics_warp_factor = 0
+            # At 1x warp we can have a stiffer hand on the tiller.  "This
+            # determines the maximum angular velocity of the vessel."  So it
+            # sounds like a damping parameter?
+            vessel.auto_pilot.stopping_time = (0.5, 0.5, 0.5)
+            # Let's try to target the angle more precisely. Default is 1 degree.
+            vessel.auto_pilot.attenuation_angle = (0.5, 0.5, 0.5)
+            # Could also consider deceleration_time.  "This determines the
+            # angular acceleration used to decelerate the vessel."  So the
+            # proportional term of a PID controller?
 
         # Point toward the burn's initial attitude while coasting, so the
         # craft has time to rotate into position before ignition.
@@ -693,51 +769,172 @@ def gravity_turn(
     ECC_TOLERANCE = 0.1  # "circular enough" eccentricity to stop the burn
     BURN_TIME_SAFETY_MARGIN = 1.5  # abort if we run this much past the plan
 
-    while True:
-        t = ut() - burn_start_ut
-        theta = plan.ref_angle + math.atan(plan.a_coeff + plan.b_coeff * t)
-        thrust_dir = plan.plane.from_plane(np.array([math.cos(theta), math.sin(theta)]))
-        vessel.auto_pilot.target_direction = tuple(thrust_dir)
+    print(f"Auto tuning the auto pilot PID parameters? {vessel.auto_pilot.auto_tune}")
 
-        # Auto-staging during burn
-        if available_thrust() == 0 and current_stage() > 0:
-            separation_start = ut()
-            throttle = 0.0
-            vessel.control.throttle = throttle
-            vessel.control.activate_next_stage()
-            print("\n  ⚡ STAGE SEPARATION")
-            time.sleep(0.5)
-            if available_thrust() == 0 and current_stage() > 0:
+    with (
+        open("circularization_actual.csv", "w", newline="")
+        if TIMESERIES_LOGGING
+        else contextlib.nullcontext()
+    ) as csv_file:
+        csv_writer = None
+        if csv_file is not None:
+            csv_writer = csv.writer(csv_file)
+            csv_writer.writerow(
+                [
+                    "ut",
+                    "t",
+                    "x",
+                    "y",
+                    "z",
+                    "vx",
+                    "vy",
+                    "vz",
+                    "mass",
+                    "thrust_x",
+                    "thrust_y",
+                    "thrust_z",
+                    "intended_thrust_dir_r",
+                    "intended_thrust_dir_w",
+                    "intended_thrust_dir_x",
+                    "intended_thrust_dir_y",
+                    "intended_thrust_dir_z",
+                    "actual_thrust_dir_x",
+                    "actual_thrust_dir_y",
+                    "actual_thrust_dir_z",
+                ]
+            )
+
+        while True:
+            with (
+                ut.condition,
+                thrust.condition,
+                available_thrust.condition,
+                current_stage.condition,
+                position.condition,
+                velocity.condition,
+                mass_stream.condition,
+            ):
+                ut_now = ut()
+                avail_thrust = available_thrust()
+                cur_stage = current_stage()
+                pos_now = position()
+                vel_now = velocity()
+                mass_now = mass_stream()
+
+                thrust_now = thrust()
+                if thrust_now == 0.0:
+                    thrust_unit = (1.0, 0.0, 0.0)
+                else:
+                    thrust_unit = thrust_unit_stream()
+
+            actual_thrust_dir = thrust_now * np.array(thrust_unit)
+
+            t = ut_now - burn_start_ut
+            theta = plan.ref_angle + math.atan(plan.a_coeff + plan.b_coeff * t)
+            thrust_dir_2d = np.array([math.cos(theta), math.sin(theta)])
+            thrust_dir = plan.plane.from_plane(thrust_dir_2d)
+            vessel.auto_pilot.target_direction = tuple(thrust_dir)
+
+            angle = math.degrees(np.arccos(np.dot(thrust_unit, thrust_dir)))
+
+            print(
+                f"\n{thrust_unit=}, {thrust_dir=}, {angle=} "
+                f"error={vessel.auto_pilot.error}"
+            )
+
+            if csv_writer is not None:
+                csv_writer.writerow(
+                    [
+                        ut_now,
+                        t,
+                        pos_now[0],
+                        pos_now[1],
+                        pos_now[2],
+                        vel_now[0],
+                        vel_now[1],
+                        vel_now[2],
+                        mass_now,
+                        thrust_dir_2d[0],
+                        thrust_dir_2d[1],
+                        thrust_dir[0],
+                        thrust_dir[1],
+                        thrust_dir[2],
+                        actual_thrust_dir[0],
+                        actual_thrust_dir[1],
+                        actual_thrust_dir[2],
+                    ]
+                )
+
+            # Auto-staging during burn
+            if avail_thrust == 0 and cur_stage > 0:
+                separation_start = ut_now
+                throttle = 0.0
+                vessel.control.throttle = throttle
                 vessel.control.activate_next_stage()
-                print("  ⚡ ENGINE IGNITION")
-                time.sleep(0.3)
-            throttle = 1.0
-            vessel.control.throttle = throttle
-            print(f"Staging took: {ut() - separation_start} sec")
+                print("\n  ⚡ STAGE SEPARATION")
+                time.sleep(0.5)
+                if available_thrust() == 0 and current_stage() > 0:
+                    vessel.control.activate_next_stage()
+                    print("  ⚡ ENGINE IGNITION")
+                    time.sleep(0.3)
+                throttle = 1.0
+                vessel.control.throttle = throttle
+                print(f"Staging took: {ut() - separation_start} sec")
+                if TIMESERIES_LOGGING:
+                    engine_part = _active_engine_part(vessel)
+                    thrust_unit_stream = conn.add_stream(
+                        conn.space_center.transform_direction,
+                        local_thrust_direction,
+                        engine_part.reference_frame,
+                        frame,
+                    )
+                    thrust_now = thrust()
+                    # Start the stream so we don't deadlock
+                    thrust_unit = thrust_unit_stream()
 
-        ecc = eccentricity()
-        print_telemetry(
-            altitude(),
-            apoapsis(),
-            periapsis(),
-            math.degrees(theta),
-            throttle,
-            speed(),
-            "Circularizing",
-            eccentricity=ecc,
-        )
+            ecc = eccentricity()
+            print_telemetry(
+                altitude(),
+                apoapsis(),
+                periapsis(),
+                math.degrees(theta),
+                throttle,
+                speed(),
+                "Circularizing",
+                eccentricity=ecc,
+            )
 
-        # Stop once eccentricity is close enough to zero (apsides equal)
-        # AND has just started rising again (we've passed the minimum).
-        if ecc <= ECC_TOLERANCE and ecc > prev_ecc:
-            break
-        if t > plan.burn_time * BURN_TIME_SAFETY_MARGIN:
-            print("\n  ⚠ Burn exceeded planned duration; stopping.")
-            break
-        prev_ecc = ecc
+            # Stop once eccentricity is close enough to zero (apsides equal)
+            # AND has just started rising again (we've passed the minimum).
+            if ecc <= ECC_TOLERANCE and ecc > prev_ecc:
+                break
+            if t > plan.burn_time * BURN_TIME_SAFETY_MARGIN:
+                print("\n  ⚠ Burn exceeded planned duration; stopping.")
+                break
+            prev_ecc = ecc
+
+            # Wait for an update.
+            ut_end = ut()
+            if ut_end != ut_now:
+                if not math.isclose(ut_end - ut_now, 0.02):
+                    print(f"**********  Time changed by {ut_end - ut_now}")
+            else:
+                with ut.condition:
+                    ut.wait()
+                ut_end = ut()
+                if not math.isclose(ut_end - ut_now, 0.02):
+                    print(f"Waited! Time changed by {ut() - ut_now}")
+
+                assert ut() > ut_now
 
     vessel.control.throttle = 0.0
     print("\n  ✓ Circularization complete!")
+
+    # Write the optimizer's predicted trajectory for this burn now --
+    # deliberately after the burn completes, not before it starts, so this
+    # I/O can never delay ignition (see PLAN.md §2.4). `plan`/`ut0` are the
+    # values from the final "Coast & Replan" iteration above.
+    write_circularization_debug_csv("circularization_planned.csv", plan, segments, ut0)
 
     # ── Final Orbit Summary ─────────────────────────────────────────────
     time.sleep(1)
