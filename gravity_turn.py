@@ -37,6 +37,7 @@ import krpc.stream
 import numpy as np
 from krpc.services.spacecenter import Vessel
 
+from autopilot import CustomAutopilot
 from sim import (
     TIMESERIES_LOGGING,
     RocketSegment,
@@ -654,11 +655,11 @@ def gravity_turn(
     # ═══════════════════════════════════════════════════════════════════════
     print("\n── Coast & Replan to Burn Start ──")
 
-    vessel.auto_pilot.reference_frame = frame
-    # gentler corrections to avoid oscillation "This determines tie maximum
-    # angular velocity of the vessel."  Sounds like it's related to the damping
-    # in the PID controller?
-    vessel.auto_pilot.stopping_time = (2, 2, 2)
+    # Hand steering over to the custom PD autopilot; disengage the built-in
+    # one so they don't fight each other.
+    vessel.auto_pilot.disengage()
+    vessel.control.sas = False
+    autopilot = CustomAutopilot(conn, vessel, frame)
 
     # Will we get more accurate thrust direction vector if we only use reaction
     # wheel for direction, not gimballing?  Let's find out.
@@ -727,37 +728,19 @@ def gravity_turn(
         # Drop out of physics warp shortly before the burn so the autopilot
         # has full control authority to settle into the burn attitude.
         if plan.coast_time <= 5.0:
-            # At 1x warp we can have a stiffer hand on the tiller.
             conn.space_center.physics_warp_factor = 0
-
-            # Auto pilot parameters!
-            # https://krpc.github.io/krpc/0.5.4/tutorials/autopilot.html
-
-            # "In order to avoid overshoot, the stopping time should be smaller
-            # than the deceleration time."
-
-            # For Swivel, these settings cause yaw and pitch controls to jiggle
-            # around like crazy, and the rocket visibly oscillates.  *sigh*.
-            # They work really well for Terrier though.
-
-            # This determines the maximum angular velocity of the vessel."  So
-            # it sounds like a damping parameter?
-            vessel.auto_pilot.stopping_time = (0.5, 0.5, 0.5)
-
-            # Let's try to target the angle more precisely. Default is 1 degree.
-            # vessel.auto_pilot.attenuation_angle = (0.5, 0.5, 0.5)
-
-            # Could also consider deceleration_time.  "This determines the
-            # angular acceleration used to decelerate the vessel."  So the
-            # proportional term of a PID controller?
 
         # Point toward the burn's initial attitude while coasting, so the
         # craft has time to rotate into position before ignition.
+        # theta0 is the steering angle at the very start of the burn (t=0).
         theta0 = plan.ref_angle + math.atan(plan.a_coeff)
         initial_dir = plan.plane.from_plane(
             np.array([math.cos(theta0), math.sin(theta0)])
         )
-        vessel.auto_pilot.target_direction = tuple(initial_dir)
+
+        autopilot.update(
+            ut=ut0, target_dir=initial_dir, target_dir_dot=np.array([0, 0, 0])
+        )
 
         print(
             f"\r  Coast {plan.coast_time:>6.1f} s  "
@@ -782,6 +765,11 @@ def gravity_turn(
     # ═══════════════════════════════════════════════════════════════════════
     conn.space_center.physics_warp_factor = 0  # back to 1× for the burn
     print("\n── Circularization Burn ──")
+
+    # Flush stale coast-phase gain history so the burn starts with a clean
+    # estimation window.
+    autopilot.reset_history()
+
     throttle = 1.0
     vessel.control.throttle = throttle
     burn_start_ut = ut()
@@ -847,17 +835,20 @@ def gravity_turn(
             actual_thrust = thrust_now * np.array(thrust_unit)
 
             t = ut_now - burn_start_ut
-            theta = plan.ref_angle + math.atan(plan.a_coeff + plan.b_coeff * t)
+            tan_val = plan.a_coeff + plan.b_coeff * t
+            theta = plan.ref_angle + math.atan(tan_val)
             thrust_dir_2d = np.array([math.cos(theta), math.sin(theta)])
             thrust_dir = plan.plane.from_plane(thrust_dir_2d)
-            vessel.auto_pilot.target_direction = tuple(thrust_dir)
 
-            angle = math.degrees(np.arccos(np.dot(thrust_unit, thrust_dir)))
-
-            # print(
-            #     f"\n{thrust_unit=}, {thrust_dir=}, {angle=} "
-            #     f"error={vessel.auto_pilot.error}"
-            # )
+            # Analytical derivative of the steering direction.
+            #   d/dt atan(a + b*t) = b / (1 + (a + b*t)^2)
+            dtheta_dt = plan.b_coeff / (1.0 + tan_val**2)
+            thrust_dir_dot = plan.plane.from_plane(
+                np.array([-math.sin(theta) * dtheta_dt, math.cos(theta) * dtheta_dt])
+            )
+            autopilot.update(
+                ut=ut_now, target_dir=thrust_dir, target_dir_dot=thrust_dir_dot
+            )
 
             if csv_writer is not None:
                 csv_writer.writerow(
@@ -945,6 +936,7 @@ def gravity_turn(
                 assert ut() > ut_now
 
     vessel.control.throttle = 0.0
+    autopilot.close()
     print("\n  ✓ Circularization complete!")
 
     # Write the optimizer's predicted trajectory for this burn now --
@@ -966,9 +958,8 @@ def gravity_turn(
     print(f"  Eccentricity: {vessel.orbit.eccentricity:>10.6f}")
     print("══════════════════════════════════════════════\n")
 
-    vessel.auto_pilot.disengage()
     vessel.control.sas = True
-    print("Autopilot disengaged. SAS enabled. Have a safe flight! 🚀")
+    print("Custom autopilot closed. SAS enabled. Have a safe flight! 🚀")
 
     final_mass = resource_mass(vessel)
     print(

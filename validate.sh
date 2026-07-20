@@ -38,7 +38,7 @@ run "ruff format --check" ruff format --check .
 run "ruff check" ruff check .
 run "mypy --strict sim.py" mypy --strict sim.py
 run "pyright --warnings sim.py" pyright --warnings sim.py
-run "pytest" python3 -m pytest test_sim.py test_gravity_turn.py -v
+run "pytest" python3 -m pytest test_sim.py test_gravity_turn.py test_autopilot.py -v
 
 echo
 if [[ ${#failed[@]} -eq 0 ]]; then
