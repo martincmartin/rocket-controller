@@ -50,7 +50,6 @@ In ``ang_vel_vessel = world_to_vessel.apply(ang_vel_world)``:
 
 """
 
-import contextlib
 import math
 from collections import deque
 from typing import Any
@@ -58,6 +57,8 @@ from typing import Any
 import numpy as np
 from numpy.typing import NDArray
 from scipy.spatial.transform import Rotation
+
+from KSPUtils import KSPStreams
 
 Vector = NDArray[np.float64]
 
@@ -243,15 +244,21 @@ class _AxisController:
 class CustomAutopilot:
     """Self-calibrating PD autopilot for the coast and circularization phases.
 
-    Opens kRPC streams for vessel orientation, angular velocity, available
-    torque, and moment of inertia.  Call ``update()`` once per physics tick
-    to compute and apply pitch/yaw control commands.  Call ``close()`` to
-    remove the streams when done.
+    Registers kRPC streams for vessel orientation and angular velocity on the
+    provided ``KSPStreams`` object.  The caller is responsible for calling
+    ``ks.start()`` and ``ks.next()`` — this class never calls either.  Call
+    ``update()`` once per physics tick (after ``ks.next()``) to compute and
+    apply pitch/yaw control commands.
+
+    ``available_torque`` and ``moment_of_inertia`` are read once at
+    construction time via plain kRPC property accesses to bootstrap the
+    controller gain priors; they are not streamed.
 
     Parameters
     ----------
-    conn : Any
-        Live kRPC connection (used for ``add_stream``).
+    ks : KSPStreams
+        Shared stream manager.  ``rotation`` and ``angular_velocity`` streams
+        are registered on it by this constructor.
     vessel : Any
         kRPC vessel object.
     frame : Any
@@ -273,7 +280,7 @@ class CustomAutopilot:
 
     def __init__(
         self,
-        conn: Any,
+        ks: KSPStreams,
         vessel: Any,
         frame: Any,
         dt: float = 0.02,
@@ -282,22 +289,23 @@ class CustomAutopilot:
         history_window_sec: float = 1.0,
         kc_decay_tau: float = 5.0,
     ) -> None:
-        self._conn = conn
+        self._ks = ks
         self._vessel = vessel
         self._dt = dt
 
-        # ── kRPC streams ─────────────────────────────────────────────────
-        self._rot_stream = conn.add_stream(vessel.rotation, frame)
-        self._ang_vel_stream = conn.add_stream(vessel.angular_velocity, frame)
-        self._torque_stream = conn.add_stream(getattr, vessel, "available_torque")
-        self._moi_stream = conn.add_stream(getattr, vessel, "moment_of_inertia")
+        # ── Register streams on the shared KSPStreams object ───────────────
+        ks.add_stream("rotation", vessel.rotation, frame)
+        ks.add_stream("angular_velocity", vessel.angular_velocity, frame)
 
-        # ── Bootstrap gains from physics ─────────────────────────────────
+        # ── Bootstrap gains from physics ──────────────────────────────────
+        # available_torque and moment_of_inertia are only needed once here
+        # to seed the gain priors, so they are plain kRPC property accesses
+        # rather than streams.
+        #
         # available_torque returns ((pos_x, pos_y, pos_z), (neg_x, neg_y, neg_z))
         # moment_of_inertia returns (x, y, z) in kg·m²
-        torque_pair = self._torque_stream()
-        moi = self._moi_stream()
-        # Use the average of positive and negative torque magnitudes.
+        torque_pair = vessel.available_torque
+        moi = vessel.moment_of_inertia
         torque_pos, torque_neg = torque_pair
         # Pitch axis: index 0 in ang_vel_vessel → moment_of_inertia[0]
         # Yaw axis:   index 2 in ang_vel_vessel → moment_of_inertia[2]
@@ -342,6 +350,9 @@ class CustomAutopilot:
     ) -> None:
         """Compute and apply pitch/yaw controls for one physics tick.
 
+        Must be called *after* the caller has called ``ks.next()`` so that
+        ``ks.rotation`` and ``ks.angular_velocity`` reflect the current tick.
+
         Parameters
         ----------
         ut : float
@@ -352,9 +363,12 @@ class CustomAutopilot:
             Time derivative of ``target_dir`` in ``frame`` (rad/s, tangent to
             the unit sphere).
         """
-        # ── Read streams ─────────────────────────────────────────────────
-        quat = self._rot_stream()  # (x, y, z, w) — scipy order
-        ang_vel_world = np.array(self._ang_vel_stream())
+        # ── Read from the shared KSPStreams snapshot ───────────────────────
+        # These values were captured atomically by the caller's ks.next() call,
+        # so rotation and angular_velocity are guaranteed to be from the same
+        # physics tick — essential for accurate finite-difference estimates.
+        quat = self._ks.rotation  # (x, y, z, w) — scipy order
+        ang_vel_world = np.array(self._ks.angular_velocity)
 
         world_to_vessel = Rotation.from_quat(quat).inv()
 
@@ -407,17 +421,8 @@ class CustomAutopilot:
         self._last_yaw_c = yaw_c
 
     def close(self) -> None:
-        """Remove kRPC streams.  Safe to call more than once."""
-        for stream in (
-            self._rot_stream,
-            self._ang_vel_stream,
-            self._torque_stream,
-            self._moi_stream,
-        ):
-            with contextlib.suppress(Exception):
-                stream.remove()
-        # Replace with no-ops so a second close() is harmless.
-        self._rot_stream = None  # type: ignore[assignment]
-        self._ang_vel_stream = None  # type: ignore[assignment]
-        self._torque_stream = None  # type: ignore[assignment]
-        self._moi_stream = None  # type: ignore[assignment]
+        """No-op: stream lifetime is managed by the KSPStreams owner.
+
+        Kept for API compatibility so call sites that call ``autopilot.close()``
+        continue to work without change.
+        """

@@ -1,10 +1,9 @@
 """Unit tests for autopilot.py.
 
-All tests use a fake kRPC connection — no live KSP/kRPC server needed.
+All tests use a fake KSPStreams object — no live KSP/kRPC server needed.
 """
 
 import math
-from collections.abc import Callable
 from typing import Any
 
 import numpy as np
@@ -16,11 +15,22 @@ from autopilot import CustomAutopilot, _AxisController
 
 
 class FakeStream:
-    """Callable stream that returns a fixed value, with a remove() method."""
+    """Callable stream with a condition stub and remove()."""
+
+    class _Condition:
+        def __enter__(self) -> "FakeStream._Condition":
+            return self
+
+        def __exit__(self, *_: object) -> None:
+            pass
+
+        def wait(self) -> None:
+            pass
 
     def __init__(self, value: Any) -> None:
         self._value = value
         self.removed = False
+        self.condition = self._Condition()
 
     def __call__(self) -> Any:
         return self._value
@@ -40,13 +50,22 @@ class FakeControl:
 
 
 class FakeVessel:
-    def __init__(self) -> None:
+    def __init__(
+        self,
+        torque: tuple[tuple[float, float, float], tuple[float, float, float]] = (
+            (10.0, 10.0, 10.0),
+            (-10.0, -10.0, -10.0),
+        ),
+        moi: tuple[float, float, float] = (2.0, 2.0, 2.0),
+    ) -> None:
         self.control = FakeControl()
+        # available_torque and moment_of_inertia are plain property reads in the
+        # new autopilot (not streams), so they live directly on the vessel.
+        self.available_torque = torque
+        self.moment_of_inertia = moi
 
-    # These are only used as callables passed to ``conn.add_stream`` in
-    # CustomAutopilot.__init__ (FakeConn.add_stream ignores the actual
-    # function/args and just hands back pre-seeded FakeStreams), so their
-    # bodies are never executed -- they just need to exist as attributes.
+    # These are passed to ks.add_stream() as callables; the FakeKSPStreams
+    # doesn't actually call them, so their bodies never run.
     def rotation(self, frame: Any) -> tuple[float, float, float, float]:
         return (0.0, 0.0, 0.0, 1.0)
 
@@ -54,50 +73,76 @@ class FakeVessel:
         return (0.0, 0.0, 0.0)
 
 
-class FakeConn:
-    """Minimal fake kRPC connection that creates FakeStreams."""
+class FakeKSPStreams:
+    """Minimal fake KSPStreams for autopilot tests.
+
+    Holds FakeStream objects for ``rotation`` and ``angular_velocity`` that
+    tests can inspect and mutate.  Provides the ``__getattr__`` interface that
+    ``CustomAutopilot.update()`` uses to read snapshotted values.
+    """
 
     def __init__(
         self,
         rotation: tuple[float, float, float, float] = (0.0, 0.0, 0.0, 1.0),
         ang_vel: tuple[float, float, float] = (0.0, 0.0, 0.0),
-        # available_torque: ((pos_x,y,z), (neg_x,y,z))
-        torque: tuple[tuple[float, float, float], tuple[float, float, float]] = (
-            (10.0, 10.0, 10.0),
-            (-10.0, -10.0, -10.0),
-        ),
-        moi: tuple[float, float, float] = (2.0, 2.0, 2.0),
     ) -> None:
-        self._streams: list[FakeStream] = []
-        self._rot = FakeStream(rotation)
-        self._ang_vel = FakeStream(ang_vel)
-        self._torque = FakeStream(torque)
-        self._moi = FakeStream(moi)
+        self._rot_stream = FakeStream(rotation)
+        self._ang_vel_stream = FakeStream(ang_vel)
+        # Map stream name → FakeStream, populated by add_stream().
+        self._registered: dict[str, FakeStream] = {}
 
-    def add_stream(
-        self, func: Callable[..., Any], *args: Any, **kwargs: Any
-    ) -> FakeStream:
-        # Return streams in order: rotation, ang_vel, torque, moi
-        order = [self._rot, self._ang_vel, self._torque, self._moi]
-        idx = len(self._streams)
-        stream = order[idx] if idx < len(order) else FakeStream(None)
-        self._streams.append(stream)
-        return stream
+    def add_stream(self, name: str, func: Any, *args: Any, **kwargs: Any) -> None:
+        """Record which streams the autopilot registers."""
+        if name == "rotation":
+            self._registered[name] = self._rot_stream
+        elif name == "angular_velocity":
+            self._registered[name] = self._ang_vel_stream
+        else:
+            self._registered[name] = FakeStream(None)
+
+    def start(self) -> None:
+        pass
+
+    def next(self) -> None:
+        pass
+
+    def close(self) -> None:
+        for s in self._registered.values():
+            s.remove()
+        self._registered.clear()
 
     def set_rotation(self, quat: tuple[float, float, float, float]) -> None:
-        self._rot.set(quat)
+        self._rot_stream.set(quat)
 
     def set_ang_vel(self, v: tuple[float, float, float]) -> None:
-        self._ang_vel.set(v)
+        self._ang_vel_stream.set(v)
+
+    # KSPStreams attribute access: return the current stream value directly
+    # (in the real class these are populated by next(), but here we read live).
+    def __getattr__(self, name: str) -> Any:
+        if name.startswith("_"):
+            raise AttributeError(name)
+        registered = object.__getattribute__(self, "_registered")
+        if name in registered:
+            return registered[name]()
+        raise AttributeError(f"FakeKSPStreams: no stream {name!r}")
 
 
-def _make_autopilot(**kwargs: Any) -> tuple[CustomAutopilot, FakeConn, FakeVessel]:
-    """Build a CustomAutopilot backed by a FakeConn."""
-    conn = FakeConn(**kwargs)
-    vessel = FakeVessel()
+def _make_autopilot(
+    torque: tuple[tuple[float, float, float], tuple[float, float, float]] = (
+        (10.0, 10.0, 10.0),
+        (-10.0, -10.0, -10.0),
+    ),
+    moi: tuple[float, float, float] = (2.0, 2.0, 2.0),
+    rotation: tuple[float, float, float, float] = (0.0, 0.0, 0.0, 1.0),
+    ang_vel: tuple[float, float, float] = (0.0, 0.0, 0.0),
+) -> tuple[CustomAutopilot, FakeKSPStreams, FakeVessel]:
+    """Build a CustomAutopilot backed by a FakeKSPStreams."""
+    ks = FakeKSPStreams(rotation=rotation, ang_vel=ang_vel)
+    vessel = FakeVessel(torque=torque, moi=moi)
     frame = object()
-    ap = CustomAutopilot(conn, vessel, frame)
-    return ap, conn, vessel
+    ap = CustomAutopilot(ks, vessel, frame)
+    return ap, ks, vessel
 
 
 # ─── _AxisController unit tests ───────────────────────────────────────────────
@@ -267,7 +312,7 @@ class TestAxisController:
 class TestCustomAutopilot:
     def test_zero_error_sets_zero_controls(self) -> None:
         """With vessel already pointing at target, controls should be ~0."""
-        ap, _conn, vessel = _make_autopilot()
+        ap, _ks, vessel = _make_autopilot()
         # Identity rotation: vessel frame == world frame
         # Target is the vessel nose direction in vessel frame: [0, 1, 0] in world
         # With identity quaternion, vessel +y = world +y.
@@ -280,7 +325,7 @@ class TestCustomAutopilot:
 
     def test_pitch_error_sets_nonzero_pitch(self) -> None:
         """A pure pitch error should produce a nonzero pitch command."""
-        ap, _conn, vessel = _make_autopilot()
+        ap, _ks, vessel = _make_autopilot()
         # Rotate target direction slightly in pitch (tilt nose up a bit).
         # In world frame, pitch the target ~5° toward the -z direction
         # (vessel frame +y=forward, -z=up when in identity orientation).
@@ -302,9 +347,9 @@ class TestCustomAutopilot:
         up exactly ``(0, -1, 0)``, so both ``delta_theta_pitch`` and
         ``delta_theta_yaw`` (which come from the x/z components) are exactly
         zero, giving no signal to correct on. A target perpendicular to the
-        nose avoids that singularity while still being a "large" error.
+        nose avoids that singularity while still being a \"large\" error.
         """
-        ap, _conn, vessel = _make_autopilot()
+        ap, _ks, vessel = _make_autopilot()
         # Point 90° away from the nose, in the pitch plane.
         target_dir = np.array([0.0, 0.0, 1.0])
         target_dir_dot = np.zeros(3)
@@ -312,20 +357,14 @@ class TestCustomAutopilot:
         assert abs(vessel.control.pitch) == pytest.approx(1.0, abs=0.01)
         ap.close()
 
-    def test_close_removes_all_streams(self) -> None:
-        ap, conn, _vessel = _make_autopilot()
-        streams = conn._streams[:]
+    def test_close_is_noop(self) -> None:
+        """close() is a no-op; calling it twice must not raise."""
+        ap, _ks, _vessel = _make_autopilot()
         ap.close()
-        for s in streams:
-            assert s.removed
-
-    def test_close_is_idempotent(self) -> None:
-        ap, _conn, _vessel = _make_autopilot()
         ap.close()
-        ap.close()  # should not raise
 
     def test_reset_history_flushes_both_axes(self) -> None:
-        ap, _conn, _vessel = _make_autopilot()
+        ap, _ks, _vessel = _make_autopilot()
         # Inject some history into both axes
         ap._pitch._history.append((0.0, 0.5, 2.0))
         ap._yaw._history.append((0.0, 0.5, 2.0))
@@ -337,7 +376,7 @@ class TestCustomAutopilot:
     def test_gains_initialized_from_physics_prior(self) -> None:
         """kc prior should be torque/moi for each axis."""
         # torque magnitude 10 N·m per axis, moi 2 kg·m² per axis → prior = 5
-        ap, _conn, _vessel = _make_autopilot(
+        ap, _ks, _vessel = _make_autopilot(
             torque=((10.0, 10.0, 10.0), (-10.0, -10.0, -10.0)),
             moi=(2.0, 2.0, 2.0),
         )
@@ -345,17 +384,25 @@ class TestCustomAutopilot:
         assert ap._yaw.kc == pytest.approx(5.0, rel=1e-6)
         ap.close()
 
+    def test_rotation_and_ang_vel_streams_registered(self) -> None:
+        """CustomAutopilot must register 'rotation' and 'angular_velocity'
+        on the KSPStreams object it receives."""
+        ap, ks, _vessel = _make_autopilot()
+        assert "rotation" in ks._registered
+        assert "angular_velocity" in ks._registered
+        ap.close()
+
     def test_ang_vel_fed_to_correct_axis(self) -> None:
         """Angular velocity[0] (pitch axis) should influence pitch gain
         estimation, not yaw."""
-        ap, conn, _vessel = _make_autopilot(
+        ap, ks, _vessel = _make_autopilot(
             ang_vel=(0.5, 0.0, 0.0),  # only pitch component
         )
         target_dir = np.array([0.0, 1.0, 0.0])
         target_dir_dot = np.zeros(3)
         # Two calls so finite-differencing produces an acceleration estimate.
         ap.update(ut=0.00, target_dir=target_dir, target_dir_dot=target_dir_dot)
-        conn.set_ang_vel((0.52, 0.0, 0.0))
+        ks.set_ang_vel((0.52, 0.0, 0.0))
         ap.update(ut=0.02, target_dir=target_dir, target_dir_dot=target_dir_dot)
         # History should only exist in the pitch axis
         assert len(ap._pitch._history) >= 1

@@ -38,6 +38,7 @@ import numpy as np
 from krpc.services.spacecenter import Vessel
 
 from autopilot import CustomAutopilot
+from KSPUtils import KSPStreams
 from sim import (
     TIMESERIES_LOGGING,
     RocketSegment,
@@ -366,7 +367,7 @@ class FlightSession:
     # positive from the stub's typing, not a real bug (see PLAN.md).
     def __init__(self, conn: Any) -> None:
         self.conn = conn
-        self._streams: list[krpc.stream.Stream] = []
+        self.streams: KSPStreams  # set in __enter__
         self._ready = False  # True only strictly inside the `with` block
         self._vessel: Vessel | None = None
 
@@ -382,6 +383,7 @@ class FlightSession:
 
         self.conn.space_center.physics_warp_factor = 0
 
+        self.streams = KSPStreams(self.conn)
         self._ready = True
         return self
 
@@ -394,26 +396,31 @@ class FlightSession:
             )
         return self._vessel
 
-    def add_stream(self, func: Callable[..., Any], *args: Any, **kwargs: Any) -> Any:
-        """Like conn.add_stream(...), but the returned stream is removed
-        automatically when this session closes.
+    def add_stream(
+        self, name: str, func: Callable[..., Any], *args: Any, **kwargs: Any
+    ) -> Any:
+        """Register a named stream on this session's KSPStreams object.
 
-        Return type is deliberately `Any`, not `krpc.stream.Stream`: the
-        vendored kRPC stub's own `Stream.__call__` returns bare `object`
-        (not a generic/TypeVar), so a precisely-typed `Stream` here would
-        make every `some_stream()` read downstream (e.g. `altitude()`,
-        `position()`) infer as `object` and fail comparisons/arithmetic
-        against it -- a false positive from the stub's typing, not a real
-        bug (see PLAN.md).
+        The stream is removed automatically when this session closes via
+        ``KSPStreams.close()``.
+
+        ``name`` is the attribute name callers use to read the stream value
+        after ``fs.streams.next()`` (e.g. ``fs.streams.altitude``).
+
+        Return type is deliberately ``Any``, not ``krpc.stream.Stream``: the
+        vendored kRPC stub's own ``Stream.__call__`` returns bare ``object``
+        (not a generic/TypeVar), so a precisely-typed ``Stream`` here would
+        make every ``some_stream()`` read downstream infer as ``object`` and
+        fail comparisons/arithmetic against it -- a false positive from the
+        stub's typing, not a real bug (see PLAN.md).
         """
         if not self._ready:
             raise RuntimeError(
                 "FlightSession.add_stream(...) used outside an active session "
                 "(before __enter__ or after __exit__)"
             )
-        s = self.conn.add_stream(func, *args, **kwargs)
-        self._streams.append(s)
-        return s
+        self.streams.add_stream(name, func, *args, **kwargs)
+        return self.streams._streams[name]
 
     def __exit__(self, exc_type, exc, tb) -> None:
         self.close()
@@ -437,9 +444,7 @@ class FlightSession:
             self._try(vessel.auto_pilot.disengage)
         self._try(lambda: setattr(self.conn.space_center, "physics_warp_factor", 0))
 
-        for s in self._streams:
-            self._try(s.remove)
-        self._streams.clear()
+        self._try(self.streams.close)
 
         self._vessel = None
         self._ready = False
@@ -523,29 +528,39 @@ def gravity_turn(
 
     # ── Telemetry Streams ───────────────────────────────────────────────────
     # Streams are much faster than polling properties repeatedly.
-    ut = fs.add_stream(getattr, conn.space_center, "ut")
-    altitude = fs.add_stream(getattr, vessel.flight(), "mean_altitude")
-    apoapsis = fs.add_stream(getattr, vessel.orbit, "apoapsis_altitude")
-    periapsis = fs.add_stream(getattr, vessel.orbit, "periapsis_altitude")
-    eccentricity = fs.add_stream(getattr, vessel.orbit, "eccentricity")
+    # All streams are registered on fs.streams so they are cleaned up
+    # automatically when the session closes.
+    # ut = fs.add_stream("ut", getattr, conn.space_center, "ut")
+    altitude = fs.add_stream("altitude", getattr, vessel.flight(), "mean_altitude")
+    apoapsis = fs.add_stream("apoapsis", getattr, vessel.orbit, "apoapsis_altitude")
+    periapsis = fs.add_stream("periapsis", getattr, vessel.orbit, "periapsis_altitude")
+    eccentricity = fs.add_stream("eccentricity", getattr, vessel.orbit, "eccentricity")
     speed = fs.add_stream(
-        getattr, vessel.flight(vessel.orbit.body.reference_frame), "speed"
+        "speed", getattr, vessel.flight(vessel.orbit.body.reference_frame), "speed"
     )
     # Used by the Coast & Replan loop below. Streamed (rather than the
     # blocking vessel.position(frame)/vessel.velocity(frame) calls) so
     # repeated reads don't each cost a network round trip.
-    position = fs.add_stream(vessel.position, frame)
-    velocity = fs.add_stream(vessel.velocity, frame)
+    position = fs.add_stream("position", vessel.position, frame)
+    velocity = fs.add_stream("velocity", vessel.velocity, frame)
     # Auto-staging checks (ascent + circularization loops) and the Coast
     # & Replan loop's replanning input -- all read every iteration of a
     # tight loop, so streamed for the same reason as the telemetry above.
-    available_thrust = fs.add_stream(getattr, vessel, "available_thrust")
-    current_stage = fs.add_stream(getattr, vessel.control, "current_stage")
-    thrust = fs.add_stream(getattr, vessel, "thrust")
-    time_to_apoapsis = fs.add_stream(getattr, vessel.orbit, "time_to_apoapsis")
+    available_thrust = fs.add_stream(
+        "available_thrust", getattr, vessel, "available_thrust"
+    )
+    current_stage = fs.add_stream(
+        "current_stage", getattr, vessel.control, "current_stage"
+    )
+    thrust = fs.add_stream("thrust", getattr, vessel, "thrust")
+    time_to_apoapsis = fs.add_stream(
+        "time_to_apoapsis", getattr, vessel.orbit, "time_to_apoapsis"
+    )
     # Only used for circularization-burn debug logging (see PLAN.md §2.1).
-    mass_stream = fs.add_stream(getattr, vessel, "mass")
+    fs.add_stream("mass", getattr, vessel, "mass")
 
+    # Start all streams and block until each has its first value.
+    fs.streams.start()
     current_stage.start()
 
     # ── Pre-Launch Setup ────────────────────────────────────────────────────
@@ -659,7 +674,10 @@ def gravity_turn(
     # one so they don't fight each other.
     vessel.auto_pilot.disengage()
     vessel.control.sas = False
-    autopilot = CustomAutopilot(conn, vessel, frame)
+    # CustomAutopilot registers 'rotation' and 'angular_velocity' on fs.streams.
+    # fs.streams.start() is called again below after TIMESERIES_LOGGING streams
+    # are (conditionally) registered, so it covers those new streams too.
+    autopilot = CustomAutopilot(fs.streams, vessel, frame)
 
     # Will we get more accurate thrust direction vector if we only use reaction
     # wheel for direction, not gimballing?  Let's find out.
@@ -683,24 +701,25 @@ def gravity_turn(
         engine_part = _active_engine_part(vessel)
 
         local_thrust_direction = (0, +1, 0)
-        thrust_unit_stream = conn.add_stream(
+        fs.streams.add_stream(
+            "thrust_unit",
             conn.space_center.transform_direction,
             local_thrust_direction,
             engine_part.reference_frame,
             frame,
         )
-        thrust_unit_stream.start()
+        fs.streams.start()
     else:
         engine_part = None
 
-    # Make sure these streams have started.
-    # print(f"{vessel.control.current_stage=}", flush=True)
-    print(f"{current_stage()=}", flush=True)
-    mass_stream()
-    thrust()
+    # Make sure all streams (including those just registered by CustomAutopilot
+    # and, if TIMESERIES_LOGGING, thrust_unit) have started and produced their
+    # first values before entering the coast loop.
+    fs.streams.start()
 
     first_iteration = True
     while True:
+        fs.streams.next()
         # Snapshot position/velocity once per iteration, under both
         # streams' condition locks so they're guaranteed to come from the
         # same physics tick as each other (see PLAN.md §2.4). Read once
@@ -710,8 +729,7 @@ def gravity_turn(
         r3d = np.array(position())
         v3d = np.array(velocity())
         tta = time_to_apoapsis()
-        ut0 = ut()  # pre-call snapshot -- see burn_start_time below
-
+        ut0 = fs.streams.ut  # pre-call snapshot -- see burn_start_time below
         # Replan on every iteration against the vessel's live state: fuel
         # burned, drag-induced orbital changes, and elapsed time all shift
         # the optimal (coast_time, a_coeff, b_coeff, burn_time) solution.
@@ -756,9 +774,8 @@ def gravity_turn(
             print()  # preserve the initial values in scrollback for comparison
             first_iteration = False
 
-        if ut() >= burn_start_time:
+        if fs.streams.ut >= burn_start_time:
             break
-        print()
 
     # ═══════════════════════════════════════════════════════════════════════
     #  Circularization Burn
@@ -772,7 +789,7 @@ def gravity_turn(
 
     throttle = 1.0
     vessel.control.throttle = throttle
-    burn_start_ut = ut()
+    burn_start_ut = fs.streams.ut
     prev_ecc = eccentricity()
     ECC_TOLERANCE = 0.1  # "circular enough" eccentricity to stop the burn
     BURN_TIME_SAFETY_MARGIN = 1.5  # abort if we run this much past the plan
@@ -810,27 +827,25 @@ def gravity_turn(
             )
 
         while True:
-            with (
-                ut.condition,
-                thrust.condition,
-                available_thrust.condition,
-                current_stage.condition,
-                position.condition,
-                velocity.condition,
-                mass_stream.condition,
-            ):
-                ut_now = ut()
-                avail_thrust = available_thrust()
-                cur_stage = current_stage()
-                pos_now = position()
-                vel_now = velocity()
-                mass_now = mass_stream()
+            # Block until the next physics tick and snapshot all streams
+            # atomically so rotation, angular_velocity, thrust, position,
+            # velocity, etc. all come from the same tick.
+            fs.streams.next()
+            ut_now = fs.streams.ut
+            avail_thrust = fs.streams.available_thrust
+            cur_stage = fs.streams.current_stage
+            pos_now = fs.streams.position
+            vel_now = fs.streams.velocity
+            mass_now = fs.streams.mass
+            thrust_now = fs.streams.thrust
 
-                thrust_now = thrust()
+            if TIMESERIES_LOGGING:
                 if thrust_now == 0.0:
                     thrust_unit = (1.0, 0.0, 0.0)
                 else:
-                    thrust_unit = thrust_unit_stream()
+                    thrust_unit = fs.streams.thrust_unit
+            else:
+                thrust_unit = (1.0, 0.0, 0.0)
 
             actual_thrust = thrust_now * np.array(thrust_unit)
 
@@ -875,7 +890,6 @@ def gravity_turn(
 
             # Auto-staging during burn
             if avail_thrust == 0 and cur_stage > 0:
-                separation_start = ut_now
                 throttle = 0.0
                 vessel.control.throttle = throttle
                 vessel.control.activate_next_stage()
@@ -887,18 +901,16 @@ def gravity_turn(
                     time.sleep(0.3)
                     throttle = 1.0
                     vessel.control.throttle = throttle
-                    print(f"Staging took: {ut() - separation_start} sec")
                 if TIMESERIES_LOGGING:
                     engine_part = _active_engine_part(vessel)
-                    thrust_unit_stream = conn.add_stream(
+                    fs.streams.add_stream(
+                        "thrust_unit",
                         conn.space_center.transform_direction,
                         local_thrust_direction,
                         engine_part.reference_frame,
                         frame,
                     )
-                    thrust_now = thrust()
-                    # Start the stream so we don't deadlock
-                    thrust_unit = thrust_unit_stream()
+                    fs.streams.start()
 
             ecc = eccentricity()
             print_telemetry(
@@ -920,20 +932,6 @@ def gravity_turn(
                 print("\n  ⚠ Burn exceeded planned duration; stopping.")
                 break
             prev_ecc = ecc
-
-            # Wait for an update.
-            ut_end = ut()
-            if ut_end != ut_now:
-                if not math.isclose(ut_end - ut_now, 0.02):
-                    print(f"**********  Time changed by {ut_end - ut_now}")
-            else:
-                with ut.condition:
-                    ut.wait()
-                    ut_end = ut()
-                if not math.isclose(ut_end - ut_now, 0.02):
-                    print(f"Waited! Time changed by {ut() - ut_now}")
-
-                assert ut() > ut_now
 
     vessel.control.throttle = 0.0
     autopilot.close()

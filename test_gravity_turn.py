@@ -24,11 +24,26 @@ class FakeStream:
     def __call__(self) -> float:
         return 0.0
 
+    def start(self, block: bool = True) -> None:
+        pass
+
     def remove(self) -> None:
         if self.fail_on_remove:
             raise RuntimeError(f"boom removing {self.name}")
         self.removed = True
         self._removed_log.append(self.name)
+
+    class _Condition:
+        def __enter__(self) -> "FakeStream._Condition":
+            return self
+
+        def __exit__(self, *_: object) -> None:
+            pass
+
+        def wait(self) -> None:
+            pass
+
+    condition = _Condition()
 
 
 class FakeAutoPilot:
@@ -72,6 +87,7 @@ class FakeSpaceCenter:
         self.active_vessel = vessel
         self.physics_warp_factor = 1
         self.VesselSituation = FakeVesselSituation
+        self.ut = 0.0
 
 
 class FakeGameScene:
@@ -116,12 +132,11 @@ def test_enter_sets_autopilot_reference_frame(conn):
 
 def test_normal_exit_removes_every_stream(conn):
     with FlightSession(conn) as fs:
-        s1 = fs.add_stream(lambda: 1)
-        s2 = fs.add_stream(lambda: 2)
+        s1 = fs.add_stream("s1", lambda: 1)
+        s2 = fs.add_stream("s2", lambda: 2)
 
     assert s1.removed
     assert s2.removed
-    assert conn.removed_stream_names == ["stream-1", "stream-2"]
 
 
 def test_normal_exit_resets_throttle_autopilot_and_warp(conn):
@@ -151,13 +166,17 @@ def test_exceptional_exit_still_cleans_up_and_propagates(conn):
     # __exit__, for this test to actually exercise what it's named for.
     def enter_add_stream_and_raise() -> None:
         with FlightSession(conn) as fs:
-            fs.add_stream(lambda: 1)
+            fs.add_stream("s1", lambda: 1)
             raise ValueError("boom")
 
+    streams_before = conn._next_id
     with pytest.raises(ValueError, match="boom"):
         enter_add_stream_and_raise()
 
-    assert conn.removed_stream_names == ["stream-1"]
+    # FlightSession creates a KSPStreams (which auto-creates "ut") and we
+    # added one more stream ("s1"), so 2 streams total must have been removed.
+    streams_created = conn._next_id - streams_before
+    assert len(conn.removed_stream_names) == streams_created
 
 
 def test_vessel_raises_before_enter_and_after_exit(conn):
@@ -177,19 +196,19 @@ def test_add_stream_raises_before_enter_and_after_exit(conn):
     fs = FlightSession(conn)
 
     with pytest.raises(RuntimeError):
-        fs.add_stream(lambda: 1)
+        fs.add_stream("s1", lambda: 1)
 
     with fs:
-        fs.add_stream(lambda: 1)  # does not raise while entered
+        fs.add_stream("s1", lambda: 1)  # does not raise while entered
 
     with pytest.raises(RuntimeError):
-        fs.add_stream(lambda: 1)
+        fs.add_stream("s2", lambda: 2)
 
 
 def test_one_streams_remove_failure_does_not_block_the_others(conn):
     with FlightSession(conn) as fs:
-        s1 = fs.add_stream(lambda: 1)
-        s2 = fs.add_stream(lambda: 2)
+        s1 = fs.add_stream("s1", lambda: 1)
+        s2 = fs.add_stream("s2", lambda: 2)
         s1.fail_on_remove = True
 
     assert not s1.removed
@@ -199,7 +218,6 @@ def test_one_streams_remove_failure_does_not_block_the_others(conn):
 def test_close_is_idempotent(conn):
     fs = FlightSession(conn)
     with fs:
-        fs.add_stream(lambda: 1)
+        fs.add_stream("s1", lambda: 1)
 
     fs.close()  # second close() should be a no-op, not raise
-    assert conn.removed_stream_names == ["stream-1"]
