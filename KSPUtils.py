@@ -30,6 +30,9 @@ Notes
 import contextlib
 from typing import Any
 
+import krpc
+import krpc.client
+
 
 class KSPStreams:
     """Manages a set of kRPC streams, snapshotting them atomically each tick.
@@ -40,7 +43,7 @@ class KSPStreams:
         Live kRPC connection object (``krpc.connect(...)`` return value).
     """
 
-    def __init__(self, conn: Any) -> None:
+    def __init__(self, conn: krpc.client.Client) -> None:
         self._conn = conn
         # Insertion-ordered dict of name → stream object.
         # ``ut`` is always the first entry.
@@ -52,7 +55,7 @@ class KSPStreams:
         ut_stream = conn.add_stream(getattr, conn.space_center, "ut")
         self._streams["ut"] = ut_stream
         # Read the initial ut value; used by next() to detect a new tick.
-        self._prev_ut: float | None = ut_stream()
+        self._prev_ut: float | None = None
 
     # ------------------------------------------------------------------
     # Public API
@@ -78,8 +81,7 @@ class KSPStreams:
                 "Cannot replace the 'ut' stream; it is managed by KSPStreams."
             )
         if name in self._streams:
-            with contextlib.suppress(Exception):
-                self._streams[name].remove()
+            self._streams[name].remove()
         self._streams[name] = self._conn.add_stream(func, *args, **kwargs)
 
     def start(self) -> None:
@@ -101,7 +103,7 @@ class KSPStreams:
                 for stream in self._streams.values():
                     stream()
                 break
-            except Exception:
+            except krpc.error.StreamError:
                 pass
 
     def next(self) -> None:
