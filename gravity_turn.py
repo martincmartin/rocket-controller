@@ -608,7 +608,7 @@ def gravity_turn(
             remaining_frac = (ENGINE_CUTOFF_ALTITUDE - ap) / (
                 ENGINE_CUTOFF_ALTITUDE * (1 - AP_THROTTLE_MARGIN)
             )
-            print(f"{remaining_frac=}")
+
             throttle = clamp(remaining_frac, 0.05, 1.0)
         else:
             throttle = 1.0

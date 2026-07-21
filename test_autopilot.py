@@ -149,9 +149,10 @@ def _make_autopilot(
 
 
 class TestAxisController:
-    def _make(self, kc_prior: float = 5.0) -> _AxisController:
+    def _make(self, kc_prior: float = 5.0, a_prior: float = 0.0) -> _AxisController:
         return _AxisController(
             kc_prior=kc_prior,
+            a_prior=a_prior,
             dt=0.02,
             sat_angle_rad=math.radians(45.0),
             omega_n_max=5.0,
@@ -166,6 +167,7 @@ class TestAxisController:
             delta_theta=0.0,
             delta_theta_dot=0.0,
             ang_vel=0.0,
+            omega_cross=0.0,
             last_c=0.0,
             verbose=False,
         )
@@ -179,6 +181,7 @@ class TestAxisController:
             delta_theta=0.1,
             delta_theta_dot=0.0,
             ang_vel=0.0,
+            omega_cross=0.0,
             last_c=0.0,
             verbose=False,
         )
@@ -191,6 +194,7 @@ class TestAxisController:
             delta_theta=-0.1,
             delta_theta_dot=0.0,
             ang_vel=0.0,
+            omega_cross=0.0,
             last_c=0.0,
             verbose=False,
         )
@@ -203,6 +207,7 @@ class TestAxisController:
             delta_theta=100.0,
             delta_theta_dot=0.0,
             ang_vel=0.0,
+            omega_cross=0.0,
             last_c=0.0,
             verbose=False,
         )
@@ -215,71 +220,81 @@ class TestAxisController:
             delta_theta=-100.0,
             delta_theta_dot=0.0,
             ang_vel=0.0,
+            omega_cross=0.0,
             last_c=0.0,
             verbose=False,
         )
         assert c == pytest.approx(-1.0)
 
-    def test_high_variance_history_fits_kc_and_k0(self) -> None:
-        """Two control values with known angular accelerations should recover
-        kc and k0 via least-squares.
+    def test_high_variance_history_fits_a_kc_and_k0(self) -> None:
+        """Three (c, omega_cross, theta_ddot) points with enough spread should
+        recover A, kc, and k0 via least-squares.
 
-        Model is ``theta_ddot = -kc * c + k0`` (kc is a non-negative
-        magnitude).
+        Model: ``theta_ddot = A*omega_cross - kc*c + k0``.
         """
+        a_true = 1.5
         kc_true = 4.0
         k0_true = 0.5
-        ctrl = self._make(kc_prior=10.0)  # start far from the truth
+        ctrl = self._make(kc_prior=10.0)  # start far from truth
 
-        # Inject two (c, theta_ddot) pairs separated by 0.02 s each.
-        # We drive theta_ddot indirectly via the finite-difference of ang_vel.
-        # Instead of going through the full update machinery, we can seed the
-        # history deque directly for a pure unit test.
-        ctrl._history.append((0.00, -1.0, -kc_true * (-1.0) + k0_true))
-        ctrl._history.append((0.02, 1.0, -kc_true * (1.0) + k0_true))
+        # Seed three data points with distinct (c, cross) combinations.
+        def obs(c: float, cross: float) -> float:
+            return a_true * cross - kc_true * c + k0_true
 
-        # Trigger a fit without adding a new measurement (no prev_ang_vel yet).
-        ctrl._update_gains(ut=0.04, c=0.0, ang_vel=0.0, verbose=False)
+        ctrl._history.append((0.00, -1.0, 0.5, obs(-1.0, 0.5)))
+        ctrl._history.append((0.02, 1.0, -0.3, obs(1.0, -0.3)))
+        ctrl._history.append((0.04, 0.0, 0.8, obs(0.0, 0.8)))
 
+        ctrl._update_gains(ut=0.06, c=0.0, ang_vel=0.0, omega_cross=0.0, verbose=False)
+
+        assert ctrl.a == pytest.approx(a_true, rel=1e-6)
         assert ctrl.kc == pytest.approx(kc_true, rel=1e-6)
         assert ctrl.k0 == pytest.approx(k0_true, rel=1e-6)
 
     def test_low_variance_history_updates_only_k0(self) -> None:
-        """With nearly constant control, kc should not change (only k0
-        updated), and kc should decay toward the prior.
+        """With nearly constant control, kc and a should decay toward priors
+        rather than being fit.  k0 is recomputed consistently.
 
-        Model is ``theta_ddot = -kc * c + k0``.
+        Model: ``theta_ddot = A*omega_cross - kc*c + k0``.
         """
         kc_start = 8.0
         kc_prior = 5.0
-        ctrl = self._make(kc_prior=kc_prior)
+        a_prior = 1.0
+        ctrl = self._make(kc_prior=kc_prior, a_prior=a_prior)
         ctrl.kc = kc_start
         ctrl.k0 = 0.0
+        ctrl.a = 3.0  # start a far from its prior
 
-        # All control values the same → variance ~0
+        # All control values the same, cross terms zero → variance ~0
         c_val = 0.5
-        a_val = -kc_start * c_val + 1.2  # implies k0=1.2
+        a_val = -kc_start * c_val + 1.2  # theta_ddot values (A=0 since cross=0)
         for i in range(10):
-            ctrl._history.append((i * 0.02, c_val, a_val))
+            ctrl._history.append((i * 0.02, c_val, 0.0, a_val))
 
-        ctrl._update_gains(ut=0.22, c=c_val, ang_vel=0.0, verbose=False)
+        ctrl._update_gains(
+            ut=0.22, c=c_val, ang_vel=0.0, omega_cross=0.0, verbose=False
+        )
 
-        # k0 should be updated using the already-decayed kc
+        # k0 should be consistent with updated kc and a (cross_mean=0)
         assert ctrl.k0 == pytest.approx(a_val + ctrl.kc * c_val, rel=1e-6)
-        # kc should have moved slightly toward the prior, not jumped
+        # kc should have moved slightly toward the prior
         assert kc_prior < ctrl.kc < kc_start
+        # a should have moved slightly toward a_prior
+        assert a_prior < ctrl.a < 3.0
 
     def test_reset_clears_history(self) -> None:
         ctrl = self._make()
-        ctrl._history.append((0.0, 0.5, 2.0))
+        ctrl._history.append((0.0, 0.5, 0.0, 2.0))
         ctrl._prev_ang_vel = 0.1
         ctrl._prev_ut = 0.0
         ctrl._prev_c = 0.5
+        ctrl._prev_omega_cross = 0.1
         ctrl.reset()
         assert len(ctrl._history) == 0
         assert ctrl._prev_ang_vel is None
         assert ctrl._prev_ut is None
         assert ctrl._prev_c is None
+        assert ctrl._prev_omega_cross is None
 
     def test_omega_n_capped_at_max(self) -> None:
         # kc very large → omega_n_sat would be huge; must be capped.
@@ -294,6 +309,7 @@ class TestAxisController:
         # omega_n_sat = sqrt(1/(pi/4)) = sqrt(4/pi) ≈ 1.128
         ctrl = _AxisController(
             kc_prior=1.0,
+            a_prior=0.0,
             dt=0.02,
             sat_angle_rad=math.pi / 4,
             omega_n_max=5.0,
@@ -304,6 +320,30 @@ class TestAxisController:
         ctrl.k0 = 0.0
         expected = math.sqrt(1.0 / (math.pi / 4))
         assert ctrl._omega_n() == pytest.approx(expected, rel=1e-9)
+
+    def test_cross_term_shifts_control_output(self) -> None:
+        """Non-zero omega_cross with A != 0 should shift the control output
+        even when the angle and rate errors are both zero.
+
+        Control law: c = (A*omega_cross + k0 - theta_ddot_desired) / kc
+        With zero errors theta_ddot_desired=0, so c = (A*omega_cross + k0) / kc.
+        """
+        ctrl = self._make(kc_prior=4.0, a_prior=0.0)
+        ctrl.kc = 4.0
+        ctrl.k0 = 0.0
+        ctrl.a = 2.0  # manually set cross-term coefficient
+        omega_cross = 0.5
+        c = ctrl.compute(
+            ut=0.0,
+            delta_theta=0.0,
+            delta_theta_dot=0.0,
+            ang_vel=0.0,
+            omega_cross=omega_cross,
+            last_c=0.0,
+            verbose=False,
+        )
+        # Expected: c = (2.0 * 0.5 + 0) / 4.0 = 0.25
+        assert c == pytest.approx(0.25, rel=1e-6)
 
 
 # ─── CustomAutopilot integration tests ───────────────────────────────────────
@@ -362,21 +402,26 @@ class TestCustomAutopilot:
     def test_reset_history_flushes_both_axes(self) -> None:
         ap, _ks, _vessel = _make_autopilot()
         # Inject some history into both axes
-        ap._pitch._history.append((0.0, 0.5, 2.0))
-        ap._yaw._history.append((0.0, 0.5, 2.0))
+        ap._pitch._history.append((0.0, 0.5, 0.0, 2.0))
+        ap._yaw._history.append((0.0, 0.5, 0.0, 2.0))
         ap.reset_history()
         assert len(ap._pitch._history) == 0
         assert len(ap._yaw._history) == 0
 
     def test_gains_initialized_from_physics_prior(self) -> None:
-        """kc prior should be torque/moi for each axis."""
-        # torque magnitude 10 N·m per axis, moi 2 kg·m² per axis → prior = 5
+        """kc and a priors should be correctly seeded from torque/moi."""
+        # torque magnitude 10 N·m per axis, moi (2, 3, 4) kg·m²
+        # kc_pitch = 10/2 = 5,  kc_yaw = 10/4 = 2.5
+        # a_pitch = (moi[1]-moi[2])/moi[0] = (3-4)/2 = -0.5
+        # a_yaw   = (moi[0]-moi[1])/moi[2] = (2-3)/4 = -0.25
         ap, _ks, _vessel = _make_autopilot(
             torque=((10.0, 10.0, 10.0), (-10.0, -10.0, -10.0)),
-            moi=(2.0, 2.0, 2.0),
+            moi=(2.0, 3.0, 4.0),
         )
         assert ap._pitch.kc == pytest.approx(5.0, rel=1e-6)
-        assert ap._yaw.kc == pytest.approx(5.0, rel=1e-6)
+        assert ap._yaw.kc == pytest.approx(2.5, rel=1e-6)
+        assert ap._pitch.a == pytest.approx(-0.5, rel=1e-6)
+        assert ap._yaw.a == pytest.approx(-0.25, rel=1e-6)
 
     def test_rotation_and_ang_vel_streams_registered(self) -> None:
         """CustomAutopilot must register 'rotation' and 'angular_velocity'
