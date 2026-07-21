@@ -54,7 +54,7 @@ class KSPStreams:
         # Create the universal-time stream automatically.
         ut_stream = conn.add_stream(getattr, conn.space_center, "ut")
         self._streams["ut"] = ut_stream
-        # Read the initial ut value; used by next() to detect a new tick.
+        # None until the first next() call; signals "no previous tick seen yet".
         self._prev_ut: float | None = None
 
     # ------------------------------------------------------------------
@@ -114,11 +114,12 @@ class KSPStreams:
 
         Must not be called from multiple threads concurrently.
         """
+        # Wait until ut advances past the value we last saw.  Check inside
+        # the condition lock and loop to handle spurious wakeups, and to
+        # avoid the race where ut advances between the check and the wait().
         ut_stream = self._streams["ut"]
-
-        # Wait until ut advances past the value we last saw.
-        if self._prev_ut is None or ut_stream() == self._prev_ut:
-            with ut_stream.condition:
+        with ut_stream.condition:
+            while ut_stream() == self._prev_ut:
                 ut_stream.wait()
 
         # Atomically snapshot every stream under all their condition locks so

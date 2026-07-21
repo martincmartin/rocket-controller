@@ -132,8 +132,10 @@ def test_enter_sets_autopilot_reference_frame(conn):
 
 def test_normal_exit_removes_every_stream(conn):
     with FlightSession(conn) as fs:
-        s1 = fs.add_stream("s1", lambda: 1)
-        s2 = fs.add_stream("s2", lambda: 2)
+        fs.add_stream("s1", lambda: 1)
+        fs.add_stream("s2", lambda: 2)
+        s1 = fs.streams._streams["s1"]
+        s2 = fs.streams._streams["s2"]
 
     assert s1.removed
     assert s2.removed
@@ -207,8 +209,10 @@ def test_add_stream_raises_before_enter_and_after_exit(conn):
 
 def test_one_streams_remove_failure_does_not_block_the_others(conn):
     with FlightSession(conn) as fs:
-        s1 = fs.add_stream("s1", lambda: 1)
-        s2 = fs.add_stream("s2", lambda: 2)
+        fs.add_stream("s1", lambda: 1)
+        fs.add_stream("s2", lambda: 2)
+        s1 = fs.streams._streams["s1"]
+        s2 = fs.streams._streams["s2"]
         s1.fail_on_remove = True
 
     assert not s1.removed

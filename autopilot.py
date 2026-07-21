@@ -419,10 +419,3 @@ class CustomAutopilot:
 
         self._last_pitch_c = pitch_c
         self._last_yaw_c = yaw_c
-
-    def close(self) -> None:
-        """No-op: stream lifetime is managed by the KSPStreams owner.
-
-        Kept for API compatibility so call sites that call ``autopilot.close()``
-        continue to work without change.
-        """

@@ -321,7 +321,6 @@ class TestCustomAutopilot:
         ap.update(ut=0.0, target_dir=target_dir, target_dir_dot=target_dir_dot)
         assert vessel.control.pitch == pytest.approx(0.0, abs=1e-9)
         assert vessel.control.yaw == pytest.approx(0.0, abs=1e-9)
-        ap.close()
 
     def test_pitch_error_sets_nonzero_pitch(self) -> None:
         """A pure pitch error should produce a nonzero pitch command."""
@@ -336,7 +335,6 @@ class TestCustomAutopilot:
         # Pitch control should be nonzero
         assert abs(vessel.control.pitch) > 0.0
         assert vessel.control.yaw == pytest.approx(0.0, abs=1e-6)
-        ap.close()
 
     def test_large_error_saturates_control(self) -> None:
         """A large (90°) pitch error should saturate the control output to
@@ -355,13 +353,11 @@ class TestCustomAutopilot:
         target_dir_dot = np.zeros(3)
         ap.update(ut=0.0, target_dir=target_dir, target_dir_dot=target_dir_dot)
         assert abs(vessel.control.pitch) == pytest.approx(1.0, abs=0.01)
-        ap.close()
 
-    def test_close_is_noop(self) -> None:
-        """close() is a no-op; calling it twice must not raise."""
+    def test_has_no_close_method(self) -> None:
+        """close() was removed; stream lifetime is owned by KSPStreams."""
         ap, _ks, _vessel = _make_autopilot()
-        ap.close()
-        ap.close()
+        assert not hasattr(ap, "close")
 
     def test_reset_history_flushes_both_axes(self) -> None:
         ap, _ks, _vessel = _make_autopilot()
@@ -371,7 +367,6 @@ class TestCustomAutopilot:
         ap.reset_history()
         assert len(ap._pitch._history) == 0
         assert len(ap._yaw._history) == 0
-        ap.close()
 
     def test_gains_initialized_from_physics_prior(self) -> None:
         """kc prior should be torque/moi for each axis."""
@@ -382,15 +377,13 @@ class TestCustomAutopilot:
         )
         assert ap._pitch.kc == pytest.approx(5.0, rel=1e-6)
         assert ap._yaw.kc == pytest.approx(5.0, rel=1e-6)
-        ap.close()
 
     def test_rotation_and_ang_vel_streams_registered(self) -> None:
         """CustomAutopilot must register 'rotation' and 'angular_velocity'
         on the KSPStreams object it receives."""
-        ap, ks, _vessel = _make_autopilot()
+        _ap, ks, _vessel = _make_autopilot()
         assert "rotation" in ks._registered
         assert "angular_velocity" in ks._registered
-        ap.close()
 
     def test_ang_vel_fed_to_correct_axis(self) -> None:
         """Angular velocity[0] (pitch axis) should influence pitch gain
@@ -406,4 +399,3 @@ class TestCustomAutopilot:
         ap.update(ut=0.02, target_dir=target_dir, target_dir_dot=target_dir_dot)
         # History should only exist in the pitch axis
         assert len(ap._pitch._history) >= 1
-        ap.close()

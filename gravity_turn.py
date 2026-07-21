@@ -420,7 +420,6 @@ class FlightSession:
                 "(before __enter__ or after __exit__)"
             )
         self.streams.add_stream(name, func, *args, **kwargs)
-        return self.streams._streams[name]
 
     def __exit__(self, exc_type, exc, tb) -> None:
         self.close()
@@ -528,40 +527,33 @@ def gravity_turn(
 
     # ── Telemetry Streams ───────────────────────────────────────────────────
     # Streams are much faster than polling properties repeatedly.
-    # All streams are registered on fs.streams so they are cleaned up
-    # automatically when the session closes.
-    # ut = fs.add_stream("ut", getattr, conn.space_center, "ut")
-    altitude = fs.add_stream("altitude", getattr, vessel.flight(), "mean_altitude")
-    apoapsis = fs.add_stream("apoapsis", getattr, vessel.orbit, "apoapsis_altitude")
-    periapsis = fs.add_stream("periapsis", getattr, vessel.orbit, "periapsis_altitude")
-    eccentricity = fs.add_stream("eccentricity", getattr, vessel.orbit, "eccentricity")
-    speed = fs.add_stream(
+    # All streams are registered on fs.streams; values are read via
+    # fs.streams.<name> after fs.streams.next() for atomic snapshots.
+    # The 'ut' stream is auto-created by KSPStreams.__init__.
+    fs.add_stream("altitude", getattr, vessel.flight(), "mean_altitude")
+    fs.add_stream("apoapsis", getattr, vessel.orbit, "apoapsis_altitude")
+    fs.add_stream("periapsis", getattr, vessel.orbit, "periapsis_altitude")
+    fs.add_stream("eccentricity", getattr, vessel.orbit, "eccentricity")
+    fs.add_stream(
         "speed", getattr, vessel.flight(vessel.orbit.body.reference_frame), "speed"
     )
     # Used by the Coast & Replan loop below. Streamed (rather than the
     # blocking vessel.position(frame)/vessel.velocity(frame) calls) so
     # repeated reads don't each cost a network round trip.
-    position = fs.add_stream("position", vessel.position, frame)
-    velocity = fs.add_stream("velocity", vessel.velocity, frame)
+    fs.add_stream("position", vessel.position, frame)
+    fs.add_stream("velocity", vessel.velocity, frame)
     # Auto-staging checks (ascent + circularization loops) and the Coast
     # & Replan loop's replanning input -- all read every iteration of a
     # tight loop, so streamed for the same reason as the telemetry above.
-    available_thrust = fs.add_stream(
-        "available_thrust", getattr, vessel, "available_thrust"
-    )
-    current_stage = fs.add_stream(
-        "current_stage", getattr, vessel.control, "current_stage"
-    )
-    thrust = fs.add_stream("thrust", getattr, vessel, "thrust")
-    time_to_apoapsis = fs.add_stream(
-        "time_to_apoapsis", getattr, vessel.orbit, "time_to_apoapsis"
-    )
-    # Only used for circularization-burn debug logging (see PLAN.md §2.1).
+    fs.add_stream("available_thrust", getattr, vessel, "available_thrust")
+    fs.add_stream("current_stage", getattr, vessel.control, "current_stage")
+    fs.add_stream("thrust", getattr, vessel, "thrust")
+    fs.add_stream("time_to_apoapsis", getattr, vessel.orbit, "time_to_apoapsis")
+    # Only used for circularization-burn debug logging.
     fs.add_stream("mass", getattr, vessel, "mass")
 
     # Start all streams and block until each has its first value.
     fs.streams.start()
-    current_stage.start()
 
     # ── Pre-Launch Setup ────────────────────────────────────────────────────
     vessel.control.sas = False
@@ -584,8 +576,9 @@ def gravity_turn(
     print(f"Auto tuning the auto pilot PID parameters? {vessel.auto_pilot.auto_tune}")
 
     while True:
-        alt = altitude()
-        ap = apoapsis()
+        fs.streams.next()
+        alt = fs.streams.altitude
+        ap = fs.streams.apoapsis
 
         # ── Gravity turn pitch profile ──────────────────────────────────
         if alt < turn_start_alt:
@@ -619,19 +612,20 @@ def gravity_turn(
             throttle = clamp(remaining_frac, 0.05, 1.0)
         else:
             throttle = 1.0
-            vessel.control.throttle = throttle
+        vessel.control.throttle = throttle
 
         if ap > ENGINE_CUTOFF_ALTITUDE * AP_WARP_MARGIN:
             conn.space_center.physics_warp_factor = 0  # 1× physics warp when close.
 
         # ── Auto-staging (fuel depletion check) ─────────────────────────
-        if available_thrust() == 0 and current_stage() > 0:
+        if fs.streams.available_thrust == 0 and fs.streams.current_stage > 0:
             time.sleep(0.5)  # brief pause so decouplers don't double-fire
             vessel.control.activate_next_stage()
             print("\n  ⚡ STAGE SEPARATION")
             time.sleep(0.5)
             # Some craft designs need a second activation (e.g. decouple then ignite)
-            if available_thrust() == 0 and current_stage() > 0:
+            fs.streams.next()
+            if fs.streams.available_thrust == 0 and fs.streams.current_stage > 0:
                 vessel.control.activate_next_stage()
                 print("  ⚡ ENGINE IGNITION")
                 time.sleep(0.3)
@@ -640,10 +634,10 @@ def gravity_turn(
         print_telemetry(
             alt,
             ap,
-            periapsis(),
+            fs.streams.periapsis,
             turn_angle,
             throttle,
-            speed(),
+            fs.streams.speed,
             phase,
         )
 
@@ -657,13 +651,15 @@ def gravity_turn(
     vessel.control.throttle = 0.0
     conn.space_center.physics_warp_factor = 3  # 4× physics warp during coast
     print(
-        f"\n  ✓ Target apoapsis reached: {apoapsis():.0f} m, "
+        f"\n  ✓ Target apoapsis reached: {fs.streams.apoapsis:.0f} m, "
         "waiting until out of atmosphere."
     )
 
     # Wait for solid boosters to burn out, and to be (mostly) out of the atmosphere
-    while thrust() > 0 or altitude() < ATMOSPHERE_ALTITUDE:
-        time.sleep(0.1)
+    while True:
+        fs.streams.next()
+        if fs.streams.thrust == 0 and fs.streams.altitude >= ATMOSPHERE_ALTITUDE:
+            break
 
     # ═══════════════════════════════════════════════════════════════════════
     #  Coast & Replan to Burn Start
@@ -719,16 +715,12 @@ def gravity_turn(
 
     first_iteration = True
     while True:
+        # fs.streams.next() atomically snapshots all streams from the same
+        # physics tick (position, velocity, ut, etc.).
         fs.streams.next()
-        # Snapshot position/velocity once per iteration, under both
-        # streams' condition locks so they're guaranteed to come from the
-        # same physics tick as each other (see PLAN.md §2.4). Read once
-        # and reuse for the rest of this iteration: find_linear_tangent_
-        # params() below can take 50 ms+, during which the streamed
-        # values would otherwise advance past what the plan was based on.
-        r3d = np.array(position())
-        v3d = np.array(velocity())
-        tta = time_to_apoapsis()
+        r3d = np.array(fs.streams.position)
+        v3d = np.array(fs.streams.velocity)
+        tta = fs.streams.time_to_apoapsis
         ut0 = fs.streams.ut  # pre-call snapshot -- see burn_start_time below
         # Replan on every iteration against the vessel's live state: fuel
         # burned, drag-induced orbital changes, and elapsed time all shift
@@ -764,9 +756,9 @@ def gravity_turn(
             f"\r  Coast {plan.coast_time:>6.1f} s  "
             f"a {plan.a_coeff:>8.5f}  b {plan.b_coeff:>9.6f}  "
             f"Burn {plan.burn_time:>6.1f} s  "
-            f"Ap {apoapsis():>7.0f}/{plan.final_apoapsis_altitude:<7.0f} m  "
-            f"Pe {periapsis():>7.0f}/{plan.final_periapsis_altitude:<7.0f} m  "
-            f"Ecc {eccentricity():>7.5f}   ",
+            f"Ap {fs.streams.apoapsis:>7.0f}/{plan.final_apoapsis_altitude:<7.0f} m  "
+            f"Pe {fs.streams.periapsis:>7.0f}/{plan.final_periapsis_altitude:<7.0f} m  "
+            f"Ecc {fs.streams.eccentricity:>7.5f}   ",
             end="",
             flush=True,
         )
@@ -789,8 +781,11 @@ def gravity_turn(
 
     throttle = 1.0
     vessel.control.throttle = throttle
-    burn_start_ut = fs.streams.ut
-    prev_ecc = eccentricity()
+    # burn_start_ut is set from the first iteration of the burn loop (after
+    # the first fs.streams.next()) so t=0 at the exact first tick of the burn.
+    burn_start_ut = 0.0  # overwritten immediately on first iteration
+    first_burn_iteration = True
+    prev_ecc = fs.streams.eccentricity
     ECC_TOLERANCE = 0.1  # "circular enough" eccentricity to stop the burn
     BURN_TIME_SAFETY_MARGIN = 1.5  # abort if we run this much past the plan
 
@@ -832,6 +827,9 @@ def gravity_turn(
             # velocity, etc. all come from the same tick.
             fs.streams.next()
             ut_now = fs.streams.ut
+            if first_burn_iteration:
+                burn_start_ut = ut_now
+                first_burn_iteration = False
             avail_thrust = fs.streams.available_thrust
             cur_stage = fs.streams.current_stage
             pos_now = fs.streams.position
@@ -895,7 +893,10 @@ def gravity_turn(
                 vessel.control.activate_next_stage()
                 print("\n  ⚡ STAGE SEPARATION")
                 time.sleep(0.5)
-                if available_thrust() == 0 and current_stage() > 0:
+                # Check whether the new stage fired; need fresh stream values
+                # after the sleep since the old snapshot is from before staging.
+                fs.streams.next()
+                if fs.streams.available_thrust == 0 and fs.streams.current_stage > 0:
                     vessel.control.activate_next_stage()
                     print("  ⚡ ENGINE IGNITION")
                     time.sleep(0.3)
@@ -912,14 +913,14 @@ def gravity_turn(
                     )
                     fs.streams.start()
 
-            ecc = eccentricity()
+            ecc = fs.streams.eccentricity
             print_telemetry(
-                altitude(),
-                apoapsis(),
-                periapsis(),
+                fs.streams.altitude,
+                fs.streams.apoapsis,
+                fs.streams.periapsis,
                 math.degrees(theta),
                 throttle,
-                speed(),
+                fs.streams.speed,
                 "Circularizing",
                 eccentricity=ecc,
             )
@@ -934,7 +935,6 @@ def gravity_turn(
             prev_ecc = ecc
 
     vessel.control.throttle = 0.0
-    autopilot.close()
     print("\n  ✓ Circularization complete!")
 
     # Write the optimizer's predicted trajectory for this burn now --
