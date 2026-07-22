@@ -296,9 +296,11 @@ def print_telemetry(
     speed,
     phase: str = "",
     eccentricity: float | None = None,
+    angle_error: float | None = None,
 ):
     """Print a single-line telemetry readout to the console."""
     ecc_str = f"Ecc {eccentricity:>7.5f}  " if eccentricity is not None else ""
+    err_str = f"Dir {angle_error:>3.2f}° " if angle_error is not None else ""
     print(
         f"\r  {phase:<20s}  "
         f"Alt {altitude:>8.0f} m  "
@@ -307,7 +309,8 @@ def print_telemetry(
         f"{ecc_str}"
         f"Pitch {pitch:>5.1f}°  "
         f"Thr {throttle:>3.0%}  "
-        f"Spd {speed:>7.1f} m/s",
+        f"Spd {speed:>7.1f} m/s"
+        f"{err_str}",
         end="",
         flush=True,
     )
@@ -460,6 +463,7 @@ class FlightSession:
         """Poll until a vessel exists, in the flight scene, sitting on
         the pad. Needed because revert_to_launch()/load() return before
         the scene has actually finished reloading."""
+        print("in wait for prelaunch", flush=True)
         deadline = time.monotonic() + cls.READY_TIMEOUT
         pre_launch = conn.space_center.VesselSituation.pre_launch
         flight_scene = conn.krpc.GameScene.flight
@@ -649,7 +653,7 @@ def gravity_turn(
 
     # Cut throttle once target apoapsis is reached
     vessel.control.throttle = 0.0
-    conn.space_center.physics_warp_factor = 3  # 4× physics warp during coast
+    conn.space_center.physics_warp_factor = 1  # 2× physics warp during coast
     print(
         f"\n  ✓ Target apoapsis reached: {fs.streams.apoapsis:.0f} m, "
         "waiting until out of atmosphere."
@@ -673,7 +677,7 @@ def gravity_turn(
     # CustomAutopilot registers 'rotation' and 'angular_velocity' on fs.streams.
     # fs.streams.start() is called again below after TIMESERIES_LOGGING streams
     # are (conditionally) registered, so it covers those new streams too.
-    autopilot = CustomAutopilot(fs.streams, vessel, frame)
+    autopilot = CustomAutopilot(fs.streams, vessel, frame, sat_angle_deg=5.0)
 
     # Will we get more accurate thrust direction vector if we only use reaction
     # wheel for direction, not gimballing?  Let's find out.
@@ -737,7 +741,7 @@ def gravity_turn(
 
         # Drop out of physics warp shortly before the burn so the autopilot
         # has full control authority to settle into the burn attitude.
-        if plan.coast_time <= 5.0:
+        if plan.coast_time <= 10.0:
             conn.space_center.physics_warp_factor = 0
 
         # Point toward the burn's initial attitude while coasting, so the
@@ -752,13 +756,16 @@ def gravity_turn(
             ut=ut0, target_dir=initial_dir, target_dir_dot=np.array([0, 0, 0])
         )
 
+        direction = vessel.flight(frame).direction
+        angle_error = math.degrees(math.acos(np.dot(direction, initial_dir)))
         print(
             f"\r  Coast {plan.coast_time:>6.1f} s  "
             f"a {plan.a_coeff:>8.5f}  b {plan.b_coeff:>9.6f}  "
             f"Burn {plan.burn_time:>6.1f} s  "
             f"Ap {fs.streams.apoapsis:>7.0f}/{plan.final_apoapsis_altitude:<7.0f} m  "
             f"Pe {fs.streams.periapsis:>7.0f}/{plan.final_periapsis_altitude:<7.0f} m  "
-            f"Ecc {fs.streams.eccentricity:>7.5f}   ",
+            f"Ecc {fs.streams.eccentricity:>7.5f} "
+            f"Dir {angle_error:>3.2f}°  ",
             end="",
             flush=True,
         )
@@ -774,10 +781,6 @@ def gravity_turn(
     # ═══════════════════════════════════════════════════════════════════════
     conn.space_center.physics_warp_factor = 0  # back to 1× for the burn
     print("\n── Circularization Burn ──")
-
-    # Flush stale coast-phase gain history so the burn starts with a clean
-    # estimation window.
-    autopilot.reset_history()
 
     throttle = 1.0
     vessel.control.throttle = throttle
@@ -913,6 +916,9 @@ def gravity_turn(
                     )
                     fs.streams.start()
 
+            direction = vessel.flight(frame).direction
+            angle_error = math.degrees(math.acos(np.dot(direction, thrust_dir)))
+
             ecc = fs.streams.eccentricity
             print_telemetry(
                 fs.streams.altitude,
@@ -923,6 +929,7 @@ def gravity_turn(
                 fs.streams.speed,
                 "Circularizing",
                 eccentricity=ecc,
+                angle_error=angle_error,
             )
 
             # Stop once eccentricity is close enough to zero (apsides equal)

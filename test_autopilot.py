@@ -9,7 +9,13 @@ from typing import Any
 import numpy as np
 import pytest
 
-from autopilot import CustomAutopilot, _AxisController
+from autopilot import (
+    CustomAutopilot,
+    _omega_n_sat,
+    _rate_gain_sat,
+    _solve_rotational_torque,
+    _torque_to_command,
+)
 
 # ─── Fakes ───────────────────────────────────────────────────────────────────
 
@@ -50,19 +56,8 @@ class FakeControl:
 
 
 class FakeVessel:
-    def __init__(
-        self,
-        torque: tuple[tuple[float, float, float], tuple[float, float, float]] = (
-            (10.0, 10.0, 10.0),
-            (-10.0, -10.0, -10.0),
-        ),
-        moi: tuple[float, float, float] = (2.0, 2.0, 2.0),
-    ) -> None:
+    def __init__(self) -> None:
         self.control = FakeControl()
-        # available_torque and moment_of_inertia are plain property reads in the
-        # new autopilot (not streams), so they live directly on the vessel.
-        self.available_torque = torque
-        self.moment_of_inertia = moi
 
     # These are passed to ks.add_stream() as callables; the FakeKSPStreams
     # doesn't actually call them, so their bodies never run.
@@ -73,11 +68,17 @@ class FakeVessel:
         return (0.0, 0.0, 0.0)
 
 
+def _diag9(x: float, y: float, z: float) -> tuple[float, ...]:
+    """Build a flat, row-major 3x3 diagonal inertia tensor."""
+    return (x, 0.0, 0.0, 0.0, y, 0.0, 0.0, 0.0, z)
+
+
 class FakeKSPStreams:
     """Minimal fake KSPStreams for autopilot tests.
 
-    Holds FakeStream objects for ``rotation`` and ``angular_velocity`` that
-    tests can inspect and mutate.  Provides the ``__getattr__`` interface that
+    Holds FakeStream objects for ``rotation``, ``angular_velocity``,
+    ``available_torque``, and ``inertia_tensor`` that tests can inspect and
+    mutate.  Provides the ``__getattr__`` interface that
     ``CustomAutopilot.update()`` uses to read snapshotted values.
     """
 
@@ -85,9 +86,15 @@ class FakeKSPStreams:
         self,
         rotation: tuple[float, float, float, float] = (0.0, 0.0, 0.0, 1.0),
         ang_vel: tuple[float, float, float] = (0.0, 0.0, 0.0),
+        available_torque: tuple[
+            tuple[float, float, float], tuple[float, float, float]
+        ] = ((10.0, 10.0, 10.0), (-10.0, -10.0, -10.0)),
+        inertia_tensor: tuple[float, ...] = _diag9(2.0, 2.0, 2.0),
     ) -> None:
         self._rot_stream = FakeStream(rotation)
         self._ang_vel_stream = FakeStream(ang_vel)
+        self._torque_stream = FakeStream(available_torque)
+        self._inertia_stream = FakeStream(inertia_tensor)
         # Map stream name → FakeStream, populated by add_stream().
         self._registered: dict[str, FakeStream] = {}
 
@@ -97,6 +104,10 @@ class FakeKSPStreams:
             self._registered[name] = self._rot_stream
         elif name == "angular_velocity":
             self._registered[name] = self._ang_vel_stream
+        elif name == "available_torque":
+            self._registered[name] = self._torque_stream
+        elif name == "inertia_tensor":
+            self._registered[name] = self._inertia_stream
         else:
             self._registered[name] = FakeStream(None)
 
@@ -117,6 +128,15 @@ class FakeKSPStreams:
     def set_ang_vel(self, v: tuple[float, float, float]) -> None:
         self._ang_vel_stream.set(v)
 
+    def set_available_torque(
+        self,
+        torque: tuple[tuple[float, float, float], tuple[float, float, float]],
+    ) -> None:
+        self._torque_stream.set(torque)
+
+    def set_inertia_tensor(self, tensor: tuple[float, ...]) -> None:
+        self._inertia_stream.set(tensor)
+
     # KSPStreams attribute access: return the current stream value directly
     # (in the real class these are populated by next(), but here we read live).
     def __getattr__(self, name: str) -> Any:
@@ -133,217 +153,177 @@ def _make_autopilot(
         (10.0, 10.0, 10.0),
         (-10.0, -10.0, -10.0),
     ),
-    moi: tuple[float, float, float] = (2.0, 2.0, 2.0),
+    inertia_tensor: tuple[float, ...] = _diag9(2.0, 2.0, 2.0),
     rotation: tuple[float, float, float, float] = (0.0, 0.0, 0.0, 1.0),
     ang_vel: tuple[float, float, float] = (0.0, 0.0, 0.0),
 ) -> tuple[CustomAutopilot, FakeKSPStreams, FakeVessel]:
     """Build a CustomAutopilot backed by a FakeKSPStreams."""
-    ks = FakeKSPStreams(rotation=rotation, ang_vel=ang_vel)
-    vessel = FakeVessel(torque=torque, moi=moi)
+    ks = FakeKSPStreams(
+        rotation=rotation,
+        ang_vel=ang_vel,
+        available_torque=torque,
+        inertia_tensor=inertia_tensor,
+    )
+    vessel = FakeVessel()
     frame = object()
     ap = CustomAutopilot(ks, vessel, frame)
     return ap, ks, vessel
 
 
-# ─── _AxisController unit tests ───────────────────────────────────────────────
+# ─── Pure function unit tests ─────────────────────────────────────────────────
 
 
-class TestAxisController:
-    def _make(self, kc_prior: float = 5.0, a_prior: float = 0.0) -> _AxisController:
-        return _AxisController(
-            kc_prior=kc_prior,
-            a_prior=a_prior,
-            dt=0.02,
-            sat_angle_rad=math.radians(45.0),
-            omega_n_max=5.0,
-            history_window_sec=1.0,
-            kc_decay_tau=5.0,
-        )
-
-    def test_zero_error_zero_rate_gives_zero_output(self) -> None:
-        ctrl = self._make()
-        c = ctrl.compute(
-            ut=0.0,
-            delta_theta=0.0,
-            delta_theta_dot=0.0,
-            ang_vel=0.0,
-            omega_cross=0.0,
-            last_c=0.0,
-            verbose=False,
-        )
-        assert c == pytest.approx(0.0, abs=1e-9)
-
-    def test_positive_angle_error_gives_positive_output(self) -> None:
-        ctrl = self._make()
-        # Small positive angle error, zero rate
-        c = ctrl.compute(
-            ut=0.0,
-            delta_theta=0.1,
-            delta_theta_dot=0.0,
-            ang_vel=0.0,
-            omega_cross=0.0,
-            last_c=0.0,
-            verbose=False,
-        )
-        assert c > 0.0
-
-    def test_negative_angle_error_gives_negative_output(self) -> None:
-        ctrl = self._make()
-        c = ctrl.compute(
-            ut=0.0,
-            delta_theta=-0.1,
-            delta_theta_dot=0.0,
-            ang_vel=0.0,
-            omega_cross=0.0,
-            last_c=0.0,
-            verbose=False,
-        )
-        assert c < 0.0
-
-    def test_large_error_saturates_at_plus_one(self) -> None:
-        ctrl = self._make()
-        c = ctrl.compute(
-            ut=0.0,
-            delta_theta=100.0,
-            delta_theta_dot=0.0,
-            ang_vel=0.0,
-            omega_cross=0.0,
-            last_c=0.0,
-            verbose=False,
-        )
-        assert c == pytest.approx(1.0)
-
-    def test_large_negative_error_saturates_at_minus_one(self) -> None:
-        ctrl = self._make()
-        c = ctrl.compute(
-            ut=0.0,
-            delta_theta=-100.0,
-            delta_theta_dot=0.0,
-            ang_vel=0.0,
-            omega_cross=0.0,
-            last_c=0.0,
-            verbose=False,
-        )
-        assert c == pytest.approx(-1.0)
-
-    def test_high_variance_history_fits_a_kc_and_k0(self) -> None:
-        """Three (c, omega_cross, theta_ddot) points with enough spread should
-        recover A, kc, and k0 via least-squares.
-
-        Model: ``theta_ddot = A*omega_cross - kc*c + k0``.
-        """
-        a_true = 1.5
-        kc_true = 4.0
-        k0_true = 0.5
-        ctrl = self._make(kc_prior=10.0)  # start far from truth
-
-        # Seed three data points with distinct (c, cross) combinations.
-        def obs(c: float, cross: float) -> float:
-            return a_true * cross - kc_true * c + k0_true
-
-        ctrl._history.append((0.00, -1.0, 0.5, obs(-1.0, 0.5)))
-        ctrl._history.append((0.02, 1.0, -0.3, obs(1.0, -0.3)))
-        ctrl._history.append((0.04, 0.0, 0.8, obs(0.0, 0.8)))
-
-        ctrl._update_gains(ut=0.06, c=0.0, ang_vel=0.0, omega_cross=0.0, verbose=False)
-
-        assert ctrl.a == pytest.approx(a_true, rel=1e-6)
-        assert ctrl.kc == pytest.approx(kc_true, rel=1e-6)
-        assert ctrl.k0 == pytest.approx(k0_true, rel=1e-6)
-
-    def test_low_variance_history_updates_only_k0(self) -> None:
-        """With nearly constant control, kc and a should decay toward priors
-        rather than being fit.  k0 is recomputed consistently.
-
-        Model: ``theta_ddot = A*omega_cross - kc*c + k0``.
-        """
-        kc_start = 8.0
-        kc_prior = 5.0
-        a_prior = 1.0
-        ctrl = self._make(kc_prior=kc_prior, a_prior=a_prior)
-        ctrl.kc = kc_start
-        ctrl.k0 = 0.0
-        ctrl.a = 3.0  # start a far from its prior
-
-        # All control values the same, cross terms zero → variance ~0
-        c_val = 0.5
-        a_val = -kc_start * c_val + 1.2  # theta_ddot values (A=0 since cross=0)
-        for i in range(10):
-            ctrl._history.append((i * 0.02, c_val, 0.0, a_val))
-
-        ctrl._update_gains(
-            ut=0.22, c=c_val, ang_vel=0.0, omega_cross=0.0, verbose=False
-        )
-
-        # k0 should be consistent with updated kc and a (cross_mean=0)
-        assert ctrl.k0 == pytest.approx(a_val + ctrl.kc * c_val, rel=1e-6)
-        # kc should have moved slightly toward the prior
-        assert kc_prior < ctrl.kc < kc_start
-        # a should have moved slightly toward a_prior
-        assert a_prior < ctrl.a < 3.0
-
-    def test_reset_clears_history(self) -> None:
-        ctrl = self._make()
-        ctrl._history.append((0.0, 0.5, 0.0, 2.0))
-        ctrl._prev_ang_vel = 0.1
-        ctrl._prev_ut = 0.0
-        ctrl._prev_c = 0.5
-        ctrl._prev_omega_cross = 0.1
-        ctrl.reset()
-        assert len(ctrl._history) == 0
-        assert ctrl._prev_ang_vel is None
-        assert ctrl._prev_ut is None
-        assert ctrl._prev_c is None
-        assert ctrl._prev_omega_cross is None
-
-    def test_omega_n_capped_at_max(self) -> None:
-        # kc very large → omega_n_sat would be huge; must be capped.
-        ctrl = self._make(kc_prior=1e6)
-        ctrl.kc = 1e6
-        ctrl.k0 = 0.0
-        assert ctrl._omega_n() == pytest.approx(5.0)
-
-    def test_omega_n_from_kc_and_k0(self) -> None:
-        # omega_n_sat = sqrt((kc - |k0|) / sat_angle_rad)
-        # With kc=1, k0=0, sat=45°=pi/4:
-        # omega_n_sat = sqrt(1/(pi/4)) = sqrt(4/pi) ≈ 1.128
-        ctrl = _AxisController(
-            kc_prior=1.0,
-            a_prior=0.0,
-            dt=0.02,
+class TestOmegaNSat:
+    def test_known_values(self) -> None:
+        # kc = (10+10)/2/2 = 5, sat=45deg=pi/4
+        # omega_n_sat = sqrt(5/(pi/4))
+        expected = math.sqrt(5.0 / (math.pi / 4))
+        result = _omega_n_sat(
+            torque_pos=10.0,
+            torque_neg=-10.0,
+            inertia_diag=2.0,
             sat_angle_rad=math.pi / 4,
             omega_n_max=5.0,
-            history_window_sec=1.0,
-            kc_decay_tau=5.0,
         )
-        ctrl.kc = 1.0
-        ctrl.k0 = 0.0
-        expected = math.sqrt(1.0 / (math.pi / 4))
-        assert ctrl._omega_n() == pytest.approx(expected, rel=1e-9)
+        assert result == pytest.approx(expected, rel=1e-9)
 
-    def test_cross_term_shifts_control_output(self) -> None:
-        """Non-zero omega_cross with A != 0 should shift the control output
-        even when the angle and rate errors are both zero.
-
-        Control law: c = (A*omega_cross + k0 - theta_ddot_desired) / kc
-        With zero errors theta_ddot_desired=0, so c = (A*omega_cross + k0) / kc.
-        """
-        ctrl = self._make(kc_prior=4.0, a_prior=0.0)
-        ctrl.kc = 4.0
-        ctrl.k0 = 0.0
-        ctrl.a = 2.0  # manually set cross-term coefficient
-        omega_cross = 0.5
-        c = ctrl.compute(
-            ut=0.0,
-            delta_theta=0.0,
-            delta_theta_dot=0.0,
-            ang_vel=0.0,
-            omega_cross=omega_cross,
-            last_c=0.0,
-            verbose=False,
+    def test_capped_at_max(self) -> None:
+        result = _omega_n_sat(
+            torque_pos=1e6,
+            torque_neg=-1e6,
+            inertia_diag=1e-3,
+            sat_angle_rad=math.radians(45.0),
+            omega_n_max=5.0,
         )
-        # Expected: c = (2.0 * 0.5 + 0) / 4.0 = 0.25
-        assert c == pytest.approx(0.25, rel=1e-6)
+        assert result == pytest.approx(5.0)
+
+    def test_zero_torque_falls_back_to_max(self) -> None:
+        result = _omega_n_sat(
+            torque_pos=0.0,
+            torque_neg=0.0,
+            inertia_diag=2.0,
+            sat_angle_rad=math.radians(45.0),
+            omega_n_max=5.0,
+        )
+        assert result == pytest.approx(5.0)
+
+
+class TestRateGainSat:
+    def test_known_values(self) -> None:
+        # kc = (10+10)/2/2 = 5, sat_rate = 0.1 rad/s
+        # lambda_roll = kc / sat_rate = 50
+        result = _rate_gain_sat(
+            torque_pos=10.0,
+            torque_neg=-10.0,
+            inertia_diag=2.0,
+            sat_rate_rad_s=0.1,
+            gain_max=100.0,
+        )
+        assert result == pytest.approx(50.0, rel=1e-9)
+
+    def test_capped_at_max(self) -> None:
+        result = _rate_gain_sat(
+            torque_pos=1e6,
+            torque_neg=-1e6,
+            inertia_diag=1e-3,
+            sat_rate_rad_s=0.1,
+            gain_max=5.0,
+        )
+        assert result == pytest.approx(5.0)
+
+    def test_zero_torque_falls_back_to_max(self) -> None:
+        result = _rate_gain_sat(
+            torque_pos=0.0,
+            torque_neg=0.0,
+            inertia_diag=2.0,
+            sat_rate_rad_s=0.1,
+            gain_max=5.0,
+        )
+        assert result == pytest.approx(5.0)
+
+
+class TestSolveRotationalTorque:
+    def test_zero_everything_gives_zero_torque(self) -> None:
+        inertia = np.diag([2.0, 3.0, 4.0])
+        ang_vel = np.array([0.0, 0.0, 0.0])
+        tau = _solve_rotational_torque(inertia, ang_vel, 0.0, 0.0, 0.0)
+        assert tau == pytest.approx([0.0, 0.0, 0.0])
+
+    def test_diagonal_tensor_is_decoupled(self) -> None:
+        inertia = np.diag([2.0, 3.0, 4.0])
+        ang_vel = np.array([0.0, 0.0, 0.0])
+        tau = _solve_rotational_torque(inertia, ang_vel, 1.0, 0.0, 0.0)
+        # Only the pitch axis should get nonzero torque.
+        assert tau[0] == pytest.approx(2.0)
+        assert tau[1] == pytest.approx(0.0)
+        assert tau[2] == pytest.approx(0.0)
+
+    def test_nondiagonal_tensor_couples_pitch_into_yaw(self) -> None:
+        """The key regression test for using the full 3x3 tensor: a pure
+        pitch angular-acceleration demand should produce nonzero yaw torque
+        when the tensor has pitch/yaw cross-coupling — something a
+        diagonal-only (principal-axis) model could never capture."""
+        inertia = np.array(
+            [
+                [2.0, 0.0, 0.5],
+                [0.0, 2.0, 0.0],
+                [0.5, 0.0, 2.0],
+            ]
+        )
+        ang_vel = np.array([0.0, 0.0, 0.0])
+        tau = _solve_rotational_torque(inertia, ang_vel, 1.0, 0.0, 0.0)
+        assert tau[0] == pytest.approx(2.0)
+        assert tau[1] == pytest.approx(0.0)
+        assert tau[2] == pytest.approx(0.5)  # nonzero due to cross-coupling
+
+    def test_gyroscopic_term_with_nonzero_angular_velocity(self) -> None:
+        inertia = np.diag([2.0, 3.0, 4.0])
+        ang_vel = np.array([1.0, 2.0, 3.0])
+        tau = _solve_rotational_torque(inertia, ang_vel, 0.0, 0.0, 0.0)
+        # gyro = omega x (I @ omega)
+        expected_gyro = np.cross(ang_vel, inertia @ ang_vel)
+        assert tau == pytest.approx(expected_gyro)
+
+    def test_round_trip_recovers_requested_alphas(self) -> None:
+        inertia = np.array(
+            [
+                [3.0, 0.2, 0.1],
+                [0.2, 2.5, 0.0],
+                [0.1, 0.0, 4.0],
+            ]
+        )
+        ang_vel = np.array([0.3, -0.2, 0.5])
+        alpha_pitch, alpha_roll, alpha_yaw = 1.2, -0.4, 0.7
+        tau = _solve_rotational_torque(
+            inertia, ang_vel, alpha_pitch, alpha_roll, alpha_yaw
+        )
+        gyro = np.cross(ang_vel, inertia @ ang_vel)
+        recovered = np.linalg.solve(inertia, tau - gyro)
+        assert recovered == pytest.approx([alpha_pitch, alpha_roll, alpha_yaw])
+
+
+class TestTorqueToCommand:
+    def test_zero_torque_gives_zero_command(self) -> None:
+        assert _torque_to_command(0.0, 10.0, -10.0) == pytest.approx(0.0)
+
+    def test_sign_is_flipped(self) -> None:
+        # Positive torque -> negative command; negative torque -> positive.
+        assert _torque_to_command(5.0, 10.0, -10.0) < 0.0
+        assert _torque_to_command(-5.0, 10.0, -10.0) > 0.0
+
+    def test_magnitude_uses_correct_direction_limit(self) -> None:
+        # tau <= 0 uses torque_neg; tau > 0 uses torque_pos.
+        assert _torque_to_command(-4.0, 10.0, -8.0) == pytest.approx(-4.0 / -8.0)
+        assert _torque_to_command(4.0, 10.0, -8.0) == pytest.approx(-4.0 / 10.0)
+
+    def test_clips_to_unit_range(self) -> None:
+        assert _torque_to_command(1000.0, 10.0, -10.0) == pytest.approx(-1.0)
+        assert _torque_to_command(-1000.0, 10.0, -10.0) == pytest.approx(1.0)
+
+    def test_near_zero_available_torque_saturates(self) -> None:
+        assert _torque_to_command(5.0, 0.0, -10.0) == pytest.approx(-1.0)
+        assert _torque_to_command(-5.0, 10.0, 0.0) == pytest.approx(1.0)
+        assert _torque_to_command(0.0, 0.0, 0.0) == pytest.approx(0.0)
 
 
 # ─── CustomAutopilot integration tests ───────────────────────────────────────
@@ -351,7 +331,8 @@ class TestAxisController:
 
 class TestCustomAutopilot:
     def test_zero_error_sets_zero_controls(self) -> None:
-        """With vessel already pointing at target, controls should be ~0."""
+        """With vessel already pointing at target and no angular velocity,
+        all three controls should be ~0."""
         ap, _ks, vessel = _make_autopilot()
         # Identity rotation: vessel frame == world frame
         # Target is the vessel nose direction in vessel frame: [0, 1, 0] in world
@@ -361,6 +342,7 @@ class TestCustomAutopilot:
         ap.update(ut=0.0, target_dir=target_dir, target_dir_dot=target_dir_dot)
         assert vessel.control.pitch == pytest.approx(0.0, abs=1e-9)
         assert vessel.control.yaw == pytest.approx(0.0, abs=1e-9)
+        assert vessel.control.roll == pytest.approx(0.0, abs=1e-9)
 
     def test_pitch_error_sets_nonzero_pitch(self) -> None:
         """A pure pitch error should produce a nonzero pitch command."""
@@ -375,6 +357,7 @@ class TestCustomAutopilot:
         # Pitch control should be nonzero
         assert abs(vessel.control.pitch) > 0.0
         assert vessel.control.yaw == pytest.approx(0.0, abs=1e-6)
+        assert vessel.control.roll == pytest.approx(0.0, abs=1e-6)
 
     def test_large_error_saturates_control(self) -> None:
         """A large (90°) pitch error should saturate the control output to
@@ -395,52 +378,56 @@ class TestCustomAutopilot:
         assert abs(vessel.control.pitch) == pytest.approx(1.0, abs=0.01)
 
     def test_has_no_close_method(self) -> None:
-        """close() was removed; stream lifetime is owned by KSPStreams."""
+        """CustomAutopilot never owned stream lifetime; still true."""
         ap, _ks, _vessel = _make_autopilot()
         assert not hasattr(ap, "close")
 
-    def test_reset_history_flushes_both_axes(self) -> None:
+    def test_has_no_reset_history_method(self) -> None:
+        """reset_history() was removed entirely: there is no more history
+        buffer to flush."""
         ap, _ks, _vessel = _make_autopilot()
-        # Inject some history into both axes
-        ap._pitch._history.append((0.0, 0.5, 0.0, 2.0))
-        ap._yaw._history.append((0.0, 0.5, 0.0, 2.0))
-        ap.reset_history()
-        assert len(ap._pitch._history) == 0
-        assert len(ap._yaw._history) == 0
+        assert not hasattr(ap, "reset_history")
 
-    def test_gains_initialized_from_physics_prior(self) -> None:
-        """kc and a priors should be correctly seeded from torque/moi."""
-        # torque magnitude 10 N·m per axis, moi (2, 3, 4) kg·m²
-        # kc_pitch = 10/2 = 5,  kc_yaw = 10/4 = 2.5
-        # a_pitch = (moi[1]-moi[2])/moi[0] = (3-4)/2 = -0.5
-        # a_yaw   = (moi[0]-moi[1])/moi[2] = (2-3)/4 = -0.25
-        ap, _ks, _vessel = _make_autopilot(
-            torque=((10.0, 10.0, 10.0), (-10.0, -10.0, -10.0)),
-            moi=(2.0, 3.0, 4.0),
-        )
-        assert ap._pitch.kc == pytest.approx(5.0, rel=1e-6)
-        assert ap._yaw.kc == pytest.approx(2.5, rel=1e-6)
-        assert ap._pitch.a == pytest.approx(-0.5, rel=1e-6)
-        assert ap._yaw.a == pytest.approx(-0.25, rel=1e-6)
-
-    def test_rotation_and_ang_vel_streams_registered(self) -> None:
-        """CustomAutopilot must register 'rotation' and 'angular_velocity'
-        on the KSPStreams object it receives."""
+    def test_streams_registered(self) -> None:
+        """CustomAutopilot must register 'rotation', 'angular_velocity',
+        'available_torque', and 'inertia_tensor' on the KSPStreams object it
+        receives."""
         _ap, ks, _vessel = _make_autopilot()
         assert "rotation" in ks._registered
         assert "angular_velocity" in ks._registered
+        assert "available_torque" in ks._registered
+        assert "inertia_tensor" in ks._registered
 
-    def test_ang_vel_fed_to_correct_axis(self) -> None:
-        """Angular velocity[0] (pitch axis) should influence pitch gain
-        estimation, not yaw."""
-        ap, ks, _vessel = _make_autopilot(
-            ang_vel=(0.5, 0.0, 0.0),  # only pitch component
+    def test_roll_rate_is_actively_damped(self) -> None:
+        """A nonzero roll rate (with zero pitch/yaw error) should produce a
+        nonzero roll command that opposes it."""
+        ap, _ks, vessel = _make_autopilot(ang_vel=(0.0, 0.5, 0.0))
+        target_dir = np.array([0.0, 1.0, 0.0])
+        target_dir_dot = np.zeros(3)
+        ap.update(ut=0.0, target_dir=target_dir, target_dir_dot=target_dir_dot)
+        assert vessel.control.roll != pytest.approx(0.0, abs=1e-9)
+
+    def test_pitch_rate_decoupled_from_yaw_roll_with_diagonal_tensor(self) -> None:
+        """With a diagonal inertia tensor, a pure pitch angular velocity (no
+        pointing error) should only affect the pitch command, not yaw/roll."""
+        ap, _ks, vessel = _make_autopilot(ang_vel=(0.5, 0.0, 0.0))
+        target_dir = np.array([0.0, 1.0, 0.0])
+        target_dir_dot = np.zeros(3)
+        ap.update(ut=0.0, target_dir=target_dir, target_dir_dot=target_dir_dot)
+        assert abs(vessel.control.pitch) > 0.0
+        assert vessel.control.yaw == pytest.approx(0.0, abs=1e-9)
+        assert vessel.control.roll == pytest.approx(0.0, abs=1e-9)
+
+    def test_pitch_rate_couples_into_yaw_with_nondiagonal_tensor(self) -> None:
+        """With a non-diagonal (pitch/yaw-coupled) inertia tensor, a pure
+        pitch angular velocity should now also produce a nonzero yaw
+        command — the integration-level version of
+        ``TestSolveRotationalTorque.test_nondiagonal_tensor_couples_pitch_into_yaw``."""
+        coupled_tensor = (2.0, 0.0, 0.5, 0.0, 2.0, 0.0, 0.5, 0.0, 2.0)
+        ap, _ks, vessel = _make_autopilot(
+            inertia_tensor=coupled_tensor, ang_vel=(0.5, 0.0, 0.0)
         )
         target_dir = np.array([0.0, 1.0, 0.0])
         target_dir_dot = np.zeros(3)
-        # Two calls so finite-differencing produces an acceleration estimate.
-        ap.update(ut=0.00, target_dir=target_dir, target_dir_dot=target_dir_dot)
-        ks.set_ang_vel((0.52, 0.0, 0.0))
-        ap.update(ut=0.02, target_dir=target_dir, target_dir_dot=target_dir_dot)
-        # History should only exist in the pitch axis
-        assert len(ap._pitch._history) >= 1
+        ap.update(ut=0.0, target_dir=target_dir, target_dir_dot=target_dir_dot)
+        assert vessel.control.yaw != pytest.approx(0.0, abs=1e-9)

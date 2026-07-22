@@ -167,7 +167,7 @@ MAX_ERROR = 1e18
 # and the live telemetry recorded during the actual burn in
 # gravity_turn.py. Off by default -- this is a debugging aid, not
 # something the flight controller depends on.
-TIMESERIES_LOGGING = True
+TIMESERIES_LOGGING = False
 
 
 @dataclass

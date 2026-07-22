@@ -6,10 +6,7 @@ After making code changes, run:
 ./validate.sh
 ```
 
-This runs everything required: `ruff format --check`, `ruff check`,
-`mypy --strict sim.py`, `pyright --warnings sim.py`, and
-`pytest test_sim.py test_gravity_turn.py -v`. It runs every check (not
-just the first failure) and reports a summary at the end.
+Checks format, lint, typing and runs tests.
 
 # Formatting
 use `ruff format .` for formatting all Python files, and
