@@ -5,3 +5,4 @@ __pycache__/
 .*.~undo-tree~
 PLAN.md
 explore.py
+step-control.csv
