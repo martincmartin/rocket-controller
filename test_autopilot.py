@@ -185,7 +185,7 @@ class TestOmegaNSat:
             sat_angle_rad=math.pi / 4,
             omega_n_max=5.0,
         )
-        assert result == pytest.approx(expected, rel=1e-9)
+        assert result == (pytest.approx(expected, rel=1e-9), False)
 
     def test_capped_at_max(self) -> None:
         result = _omega_n_sat(
@@ -195,7 +195,7 @@ class TestOmegaNSat:
             sat_angle_rad=math.radians(45.0),
             omega_n_max=5.0,
         )
-        assert result == pytest.approx(5.0)
+        assert result == (pytest.approx(5.0), True)
 
     def test_zero_torque_falls_back_to_max(self) -> None:
         result = _omega_n_sat(
@@ -205,7 +205,7 @@ class TestOmegaNSat:
             sat_angle_rad=math.radians(45.0),
             omega_n_max=5.0,
         )
-        assert result == pytest.approx(5.0)
+        assert result == (pytest.approx(5.0), True)
 
 
 class TestRateGainSat:
