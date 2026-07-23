@@ -315,6 +315,7 @@ class CustomAutopilot:
         self._alpha_filter = 1.0 - math.exp(
             -2.0 * math.pi * cutoff_freq_hz * UNWARPED_PHYSICS_TIMESTEP
         )
+        print(f"alpha filter: {self._alpha_filter}")
         self._filtered_ang_vel_world: Vector | None = None
         self._last_ut: float | None = None
 
