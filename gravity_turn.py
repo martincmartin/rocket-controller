@@ -300,7 +300,7 @@ def print_telemetry(
 ):
     """Print a single-line telemetry readout to the console."""
     ecc_str = f"Ecc {eccentricity:>7.5f}  " if eccentricity is not None else ""
-    err_str = f"Dir {angle_error:>3.2f}° " if angle_error is not None else ""
+    err_str = f"Dir {angle_error:>3.2f}°  " if angle_error is not None else ""
     print(
         f"\r  {phase:<20s}  "
         f"Alt {altitude:>8.0f} m  "
@@ -309,7 +309,7 @@ def print_telemetry(
         f"{ecc_str}"
         f"Pitch {pitch:>5.1f}°  "
         f"Thr {throttle:>3.0%}  "
-        f"Spd {speed:>7.1f} m/s"
+        f"Spd {speed:>7.1f} m/s  "
         f"{err_str}",
         end="",
         flush=True,
@@ -463,7 +463,6 @@ class FlightSession:
         """Poll until a vessel exists, in the flight scene, sitting on
         the pad. Needed because revert_to_launch()/load() return before
         the scene has actually finished reloading."""
-        print("in wait for prelaunch", flush=True)
         deadline = time.monotonic() + cls.READY_TIMEOUT
         pre_launch = conn.space_center.VesselSituation.pre_launch
         flight_scene = conn.krpc.GameScene.flight
@@ -653,7 +652,7 @@ def gravity_turn(
 
     # Cut throttle once target apoapsis is reached
     vessel.control.throttle = 0.0
-    conn.space_center.physics_warp_factor = 1  # 2× physics warp during coast
+    conn.space_center.physics_warp_factor = 3  # 4× physics warp during coast
     print(
         f"\n  ✓ Target apoapsis reached: {fs.streams.apoapsis:.0f} m, "
         "waiting until out of atmosphere."
@@ -752,9 +751,7 @@ def gravity_turn(
             np.array([math.cos(theta0), math.sin(theta0)])
         )
 
-        autopilot.update(
-            ut=ut0, target_dir=initial_dir, target_dir_dot=np.array([0, 0, 0])
-        )
+        autopilot.update(target_dir=initial_dir, target_dir_dot=np.array([0, 0, 0]))
 
         direction = vessel.flight(frame).direction
         angle_error = math.degrees(math.acos(np.dot(direction, initial_dir)))
@@ -862,9 +859,7 @@ def gravity_turn(
             thrust_dir_dot = plan.plane.from_plane(
                 np.array([-math.sin(theta) * dtheta_dt, math.cos(theta) * dtheta_dt])
             )
-            autopilot.update(
-                ut=ut_now, target_dir=thrust_dir, target_dir_dot=thrust_dir_dot
-            )
+            autopilot.update(target_dir=thrust_dir, target_dir_dot=thrust_dir_dot)
 
             if csv_writer is not None:
                 csv_writer.writerow(

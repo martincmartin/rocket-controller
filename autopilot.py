@@ -22,8 +22,21 @@ where ``I`` is the vessel's full 3x3 inertia tensor (``inertia_tensor``
 stream — *not* just the diagonal ``moment_of_inertia``, so any cross-axis
 coupling from an asymmetric mass distribution is captured exactly, not just
 the gyroscopic ``omega x (I @ omega)`` term), ``omega`` is the vessel-frame
-angular velocity (``angular_velocity`` stream), and ``tau`` is the applied
-torque.
+angular velocity, and ``tau`` is the applied torque.
+
+``omega`` is derived from the raw ``angular_velocity`` stream by a simple
+exponential low-pass filter, to reduce oscillation from noisy/high-frequency
+rate measurements:
+
+    omega_filtered(t) = alpha * omega_measured(t) + (1 - alpha) * omega_filtered(t - dt)
+
+The filter is applied to ``angular_velocity`` while it is still expressed in
+``frame`` (the non-rotating reference frame passed to the constructor) —
+*before* rotating it into the vessel body frame. ``frame`` doesn't rotate
+tick to tick, so averaging consecutive samples expressed in it is
+well-defined; the vessel body frame does rotate every tick (as the vessel
+turns), so filtering post-rotation would incorrectly mix vectors expressed
+in different frames.
 
 Given desired angular accelerations for all three axes
 (``alpha_pitch``, ``alpha_roll``, ``alpha_yaw``), the required torque is
@@ -114,6 +127,8 @@ from KSPUtils import KSPStreams
 Vector = NDArray[np.float64]
 
 
+UNWARPED_PHYSICS_TIMESTEP = 0.02  # seconds
+
 # ─── Pure physics/gain helper functions ───────────────────────────────────────
 
 
@@ -187,6 +202,15 @@ def _solve_rotational_torque(
     return tau
 
 
+def _low_pass_update(measured: Vector, filtered_prev: Vector, alpha: float) -> Vector:
+    """One step of the exponential low-pass filter.
+
+    filtered(t) = alpha * measured(t) + (1 - alpha) * filtered(t - dt)
+    """
+    result: Vector = alpha * measured + (1.0 - alpha) * filtered_prev
+    return result
+
+
 def _torque_to_command(tau: float, torque_pos: float, torque_neg: float) -> float:
     """Convert a desired own-axis torque (N·m) to a normalized ``[-1, 1]`` command.
 
@@ -247,6 +271,10 @@ class CustomAutopilot:
         Hard upper bound on the natural frequency (rad/s) for pitch/yaw, and
         on the rate-feedback gain (1/s) for roll.  Must be less than
         ``1 / (10 * dt)`` for numerical stability given the physics tick.
+    cutoff_freq_hz : float
+        Cutoff frequency (Hz) of the exponential low-pass filter applied to
+        the raw ``angular_velocity`` stream before it's used by the control
+        law, to reduce oscillation.
     """
 
     def __init__(
@@ -257,6 +285,7 @@ class CustomAutopilot:
         sat_angle_deg: float = 5.0,
         sat_roll_rate_deg_s: float = 5.0,
         omega_n_max: float = 5.0,
+        cutoff_freq_hz: float = 3.0,
     ) -> None:
         self._ks = ks
         self._vessel = vessel
@@ -279,41 +308,60 @@ class CustomAutopilot:
         self.pitch_max = False
         self.yaw_max = False
 
+        # ── Angular-velocity low-pass filter state ─────────────────────────
+        # tau_filter = 1 / (2*pi*fc); alpha computed fresh each tick from the
+        # actual dt (self._ks.ut - self._last_ut), since KSP physics ticks
+        # aren't perfectly uniform.
+        self._alpha_filter = 1.0 - math.exp(
+            -2.0 * math.pi * cutoff_freq_hz * UNWARPED_PHYSICS_TIMESTEP
+        )
+        self._filtered_ang_vel_world: Vector | None = None
+        self._last_ut: float | None = None
+
+        print(f"cutoff freq: {cutoff_freq_hz}, alpha: {self._alpha_filter}")
+
     def update(
         self,
-        ut: float,
         target_dir: Vector,
         target_dir_dot: Vector,
     ) -> None:
         """Compute and apply pitch/roll/yaw controls for one physics tick.
 
         Must be called *after* the caller has called ``ks.next()`` so that
-        ``ks.rotation``, ``ks.angular_velocity``, ``ks.available_torque``,
-        and ``ks.inertia_tensor`` reflect the current tick.
+        ``ks.ut``, ``ks.rotation``, ``ks.angular_velocity``,
+        ``ks.available_torque``, and ``ks.inertia_tensor`` reflect the
+        current tick.
 
         Parameters
         ----------
-        ut : float
-            Current universal time (seconds).  Unused by the physics-based
-            control law itself, but kept for API stability / potential
-            future use (e.g. logging).
         target_dir : ndarray, shape (3,)
             Desired nose direction (unit vector) in ``frame``.
         target_dir_dot : ndarray, shape (3,)
             Time derivative of ``target_dir`` in ``frame`` (rad/s, tangent to
             the unit sphere).
         """
-        del ut  # currently unused; kept for API stability
-
         # ── Read from the shared KSPStreams snapshot ───────────────────────
         # These values were captured atomically by the caller's ks.next() call,
         # so all streams are guaranteed to be from the same physics tick.
+        ut = self._ks.ut
         quat = self._ks.rotation  # (x, y, z, w) — scipy order
-        ang_vel_world = np.array(self._ks.angular_velocity)
+        ang_vel_world_measured = np.array(self._ks.angular_velocity)
         torque_pos, torque_neg = self._ks.available_torque
         inertia_tensor = np.array(self._ks.inertia_tensor, dtype=np.float64).reshape(
             3, 3
         )
+
+        # ── Low-pass filter the angular velocity in the (non-rotating)
+        # world frame, before rotating it into the (rotating) vessel frame.
+        # See module docstring for why the filter must be applied here.
+        if self._last_ut is None or self._filtered_ang_vel_world is None:
+            ang_vel_world = ang_vel_world_measured
+        else:
+            ang_vel_world = _low_pass_update(
+                ang_vel_world_measured, self._filtered_ang_vel_world, self._alpha_filter
+            )
+        self._filtered_ang_vel_world = ang_vel_world
+        self._last_ut = ut
 
         world_to_vessel = Rotation.from_quat(quat).inv()
 

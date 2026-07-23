@@ -11,6 +11,7 @@ import pytest
 
 from autopilot import (
     CustomAutopilot,
+    _low_pass_update,
     _omega_n_sat,
     _rate_gain_sat,
     _solve_rotational_torque,
@@ -90,11 +91,16 @@ class FakeKSPStreams:
             tuple[float, float, float], tuple[float, float, float]
         ] = ((10.0, 10.0, 10.0), (-10.0, -10.0, -10.0)),
         inertia_tensor: tuple[float, ...] = _diag9(2.0, 2.0, 2.0),
+        ut: float = 0.0,
     ) -> None:
         self._rot_stream = FakeStream(rotation)
         self._ang_vel_stream = FakeStream(ang_vel)
         self._torque_stream = FakeStream(available_torque)
         self._inertia_stream = FakeStream(inertia_tensor)
+        # ``ut`` is managed directly by the real KSPStreams (not via
+        # add_stream()), so it's a plain attribute here too, settable via
+        # set_ut() to simulate the passage of time between update() calls.
+        self.ut = ut
         # Map stream name → FakeStream, populated by add_stream().
         self._registered: dict[str, FakeStream] = {}
 
@@ -137,6 +143,9 @@ class FakeKSPStreams:
     def set_inertia_tensor(self, tensor: tuple[float, ...]) -> None:
         self._inertia_stream.set(tensor)
 
+    def set_ut(self, ut: float) -> None:
+        self.ut = ut
+
     # KSPStreams attribute access: return the current stream value directly
     # (in the real class these are populated by next(), but here we read live).
     def __getattr__(self, name: str) -> Any:
@@ -156,6 +165,8 @@ def _make_autopilot(
     inertia_tensor: tuple[float, ...] = _diag9(2.0, 2.0, 2.0),
     rotation: tuple[float, float, float, float] = (0.0, 0.0, 0.0, 1.0),
     ang_vel: tuple[float, float, float] = (0.0, 0.0, 0.0),
+    ut: float = 0.0,
+    cutoff_freq_hz: float = 1.0,
 ) -> tuple[CustomAutopilot, FakeKSPStreams, FakeVessel]:
     """Build a CustomAutopilot backed by a FakeKSPStreams."""
     ks = FakeKSPStreams(
@@ -163,10 +174,11 @@ def _make_autopilot(
         ang_vel=ang_vel,
         available_torque=torque,
         inertia_tensor=inertia_tensor,
+        ut=ut,
     )
     vessel = FakeVessel()
     frame = object()
-    ap = CustomAutopilot(ks, vessel, frame)
+    ap = CustomAutopilot(ks, vessel, frame, cutoff_freq_hz=cutoff_freq_hz)
     return ap, ks, vessel
 
 
@@ -240,6 +252,26 @@ class TestRateGainSat:
             gain_max=5.0,
         )
         assert result == pytest.approx(5.0)
+
+
+class TestLowPassUpdate:
+    def test_alpha_one_returns_measured(self) -> None:
+        measured = np.array([1.0, 2.0, 3.0])
+        prev = np.array([9.0, 9.0, 9.0])
+        result = _low_pass_update(measured, prev, alpha=1.0)
+        assert result == pytest.approx(measured)
+
+    def test_alpha_zero_returns_previous(self) -> None:
+        measured = np.array([1.0, 2.0, 3.0])
+        prev = np.array([9.0, 9.0, 9.0])
+        result = _low_pass_update(measured, prev, alpha=0.0)
+        assert result == pytest.approx(prev)
+
+    def test_alpha_half_averages(self) -> None:
+        measured = np.array([2.0, 0.0, 4.0])
+        prev = np.array([0.0, 2.0, 0.0])
+        result = _low_pass_update(measured, prev, alpha=0.5)
+        assert result == pytest.approx([1.0, 1.0, 2.0])
 
 
 class TestSolveRotationalTorque:
@@ -339,7 +371,7 @@ class TestCustomAutopilot:
         # With identity quaternion, vessel +y = world +y.
         target_dir = np.array([0.0, 1.0, 0.0])
         target_dir_dot = np.zeros(3)
-        ap.update(ut=0.0, target_dir=target_dir, target_dir_dot=target_dir_dot)
+        ap.update(target_dir=target_dir, target_dir_dot=target_dir_dot)
         assert vessel.control.pitch == pytest.approx(0.0, abs=1e-9)
         assert vessel.control.yaw == pytest.approx(0.0, abs=1e-9)
         assert vessel.control.roll == pytest.approx(0.0, abs=1e-9)
@@ -353,7 +385,7 @@ class TestCustomAutopilot:
         angle = math.radians(5.0)
         target_dir = np.array([0.0, math.cos(angle), math.sin(angle)])
         target_dir_dot = np.zeros(3)
-        ap.update(ut=0.0, target_dir=target_dir, target_dir_dot=target_dir_dot)
+        ap.update(target_dir=target_dir, target_dir_dot=target_dir_dot)
         # Pitch control should be nonzero
         assert abs(vessel.control.pitch) > 0.0
         assert vessel.control.yaw == pytest.approx(0.0, abs=1e-6)
@@ -374,7 +406,7 @@ class TestCustomAutopilot:
         # Point 90° away from the nose, in the pitch plane.
         target_dir = np.array([0.0, 0.0, 1.0])
         target_dir_dot = np.zeros(3)
-        ap.update(ut=0.0, target_dir=target_dir, target_dir_dot=target_dir_dot)
+        ap.update(target_dir=target_dir, target_dir_dot=target_dir_dot)
         assert abs(vessel.control.pitch) == pytest.approx(1.0, abs=0.01)
 
     def test_has_no_close_method(self) -> None:
@@ -404,7 +436,7 @@ class TestCustomAutopilot:
         ap, _ks, vessel = _make_autopilot(ang_vel=(0.0, 0.5, 0.0))
         target_dir = np.array([0.0, 1.0, 0.0])
         target_dir_dot = np.zeros(3)
-        ap.update(ut=0.0, target_dir=target_dir, target_dir_dot=target_dir_dot)
+        ap.update(target_dir=target_dir, target_dir_dot=target_dir_dot)
         assert vessel.control.roll != pytest.approx(0.0, abs=1e-9)
 
     def test_pitch_rate_decoupled_from_yaw_roll_with_diagonal_tensor(self) -> None:
@@ -413,7 +445,7 @@ class TestCustomAutopilot:
         ap, _ks, vessel = _make_autopilot(ang_vel=(0.5, 0.0, 0.0))
         target_dir = np.array([0.0, 1.0, 0.0])
         target_dir_dot = np.zeros(3)
-        ap.update(ut=0.0, target_dir=target_dir, target_dir_dot=target_dir_dot)
+        ap.update(target_dir=target_dir, target_dir_dot=target_dir_dot)
         assert abs(vessel.control.pitch) > 0.0
         assert vessel.control.yaw == pytest.approx(0.0, abs=1e-9)
         assert vessel.control.roll == pytest.approx(0.0, abs=1e-9)
@@ -429,5 +461,55 @@ class TestCustomAutopilot:
         )
         target_dir = np.array([0.0, 1.0, 0.0])
         target_dir_dot = np.zeros(3)
-        ap.update(ut=0.0, target_dir=target_dir, target_dir_dot=target_dir_dot)
+        ap.update(target_dir=target_dir, target_dir_dot=target_dir_dot)
         assert vessel.control.yaw != pytest.approx(0.0, abs=1e-9)
+
+    def test_first_call_uses_unfiltered_angular_velocity(self) -> None:
+        """With no previous ``ut``, the filter has no history to blend with,
+        so the very first update() call must behave exactly as if the raw
+        measured angular velocity were used directly (matching pre-filter
+        behavior)."""
+        ap, _ks, vessel = _make_autopilot(ang_vel=(0.0, 0.5, 0.0), ut=10.0)
+        target_dir = np.array([0.0, 1.0, 0.0])
+        target_dir_dot = np.zeros(3)
+        ap.update(target_dir=target_dir, target_dir_dot=target_dir_dot)
+        roll_first_call = vessel.control.roll
+
+        # An effectively-unfiltered autopilot (huge cutoff => tau ~ 0 =>
+        # alpha ~ 1 always) should produce the identical result on its
+        # first call too.
+        ap_unfiltered, _ks2, vessel2 = _make_autopilot(
+            ang_vel=(0.0, 0.5, 0.0), ut=10.0, cutoff_freq_hz=1e6
+        )
+        ap_unfiltered.update(target_dir=target_dir, target_dir_dot=target_dir_dot)
+        assert roll_first_call == pytest.approx(vessel2.control.roll)
+
+    def test_second_call_partially_tracks_step_change(self) -> None:
+        """A step change in angular velocity between two update() calls
+        should be only partially reflected in the second call's command,
+        compared to an effectively-unfiltered ('high cutoff') autopilot
+        given the exact same inputs."""
+        target_dir = np.array([0.0, 1.0, 0.0])
+        target_dir_dot = np.zeros(3)
+
+        ap, ks, vessel = _make_autopilot(ang_vel=(0.0, 0.0, 0.0), ut=0.0)
+        ap_unfiltered, ks_unfiltered, vessel_unfiltered = _make_autopilot(
+            ang_vel=(0.0, 0.0, 0.0), ut=0.0, cutoff_freq_hz=1e6
+        )
+        ap.update(target_dir=target_dir, target_dir_dot=target_dir_dot)
+        ap_unfiltered.update(target_dir=target_dir, target_dir_dot=target_dir_dot)
+
+        # Step change in roll rate, small dt relative to tau (tau = 1/(2*pi) ~ 0.159 s).
+        ks.set_ang_vel((0.0, 0.5, 0.0))
+        ks.set_ut(0.05)
+        ks_unfiltered.set_ang_vel((0.0, 0.5, 0.0))
+        ks_unfiltered.set_ut(0.05)
+
+        ap.update(target_dir=target_dir, target_dir_dot=target_dir_dot)
+        ap_unfiltered.update(target_dir=target_dir, target_dir_dot=target_dir_dot)
+
+        assert vessel.control.roll != pytest.approx(0.0, abs=1e-9)
+        assert vessel_unfiltered.control.roll != pytest.approx(0.0, abs=1e-9)
+        # The filtered response should be strictly smaller in magnitude than
+        # the unfiltered ('instant step') response.
+        assert abs(vessel.control.roll) < abs(vessel_unfiltered.control.roll)
