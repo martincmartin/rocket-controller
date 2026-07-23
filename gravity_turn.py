@@ -673,6 +673,7 @@ def gravity_turn(
     # one so they don't fight each other.
     vessel.auto_pilot.disengage()
     vessel.control.sas = False
+
     # CustomAutopilot registers 'rotation' and 'angular_velocity' on fs.streams.
     # fs.streams.start() is called again below after TIMESERIES_LOGGING streams
     # are (conditionally) registered, so it covers those new streams too.
@@ -788,8 +789,6 @@ def gravity_turn(
     prev_ecc = fs.streams.eccentricity
     ECC_TOLERANCE = 0.1  # "circular enough" eccentricity to stop the burn
     BURN_TIME_SAFETY_MARGIN = 1.5  # abort if we run this much past the plan
-
-    print(f"Auto tuning the auto pilot PID parameters? {vessel.auto_pilot.auto_tune}")
 
     with (
         open("circularization_actual.csv", "w", newline="")
