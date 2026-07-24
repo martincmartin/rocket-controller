@@ -96,9 +96,9 @@ class FlightSession:
         flight_scene = conn.krpc.GameScene.flight
         while True:
             try:
-                # current_game_scene is a coarse, cheap guard against
-                # reading a stale/leftover active_vessel while the scene
-                # itself is still transitioning (e.g. mid-load()).
+                # current_game_scene is a coarse, cheap guard against reading a
+                # stale/leftover active_vessel while the scene itself is still
+                # transitioning (e.g. mid-load()).
                 if conn.krpc.current_game_scene == flight_scene:
                     return conn.space_center.active_vessel
             except Exception:
@@ -266,6 +266,12 @@ class GravityTurn:
             self.fs.conn.space_center.physics_warp_factor = 3
 
     def eccentricity_decreasing(self) -> bool:
+        # This formula looks like the one for a circular orbit, but it's actually much
+        # more general.  It's the sign of d eccentricity / d velocity.  In other words,
+        # this tells you, as long as at least some component of thrust is in the
+        # direction of velocity (thrust dot velocity is postive), whether that burn will
+        # decrease eccentricity.  This formula doesn't just apply at apoapsis/periapsis
+        # or for circular orbits, but for any spot on any orbit.
         streams = self.fs.streams
         speed = np.linalg.norm(streams.velocity)
         radius = np.linalg.norm(streams.position)
@@ -324,9 +330,6 @@ class GravityTurn:
 
             self.plan_circularization()
 
-            # Planning takes several physics ticks, so update all our numbers.
-            streams.next()
-
             coast_time = self.burn_start_time - streams.ut
 
             if coast_time <= 10.0:
@@ -336,20 +339,14 @@ class GravityTurn:
 
         # Coast or burn?
         if self.burn_start_time > streams.ut:
-            # Replan.
-            self.plan_circularization()
-
-            # Planning takes several physics ticks, so update all our numbers.
-            streams.next()
-
             coast_time = self.burn_start_time - streams.ut
 
             if coast_time <= 10.0:
                 self.fs.conn.space_center.physics_warp_factor = 0
 
-            # Point toward the burn's initial attitude while coasting, so the
-            # craft has time to rotate into position before ignition.
-            # theta is the steering angle at the very start of the burn (t=0).
+            # Point toward the burn's initial attitude while coasting, so the craft has
+            # time to rotate into position before ignition.  theta is the steering angle
+            # at the very start of the burn (t=0).
             theta = self.plan.ref_angle + math.atan(self.plan.a_coeff)
             thrust_dir_2d = np.array([math.cos(theta), math.sin(theta)])
             thrust_dir = self.plan.plane.from_plane(thrust_dir_2d)
@@ -366,6 +363,11 @@ class GravityTurn:
                 end="",
                 flush=True,
             )
+
+            # Replan.  This takes a long time (50 ms +) so make sure you update the
+            # autopilot before calling this.
+            self.plan_circularization()
+
         else:
             self.fs.vessel.control.throttle = 1.0
             t = streams.ut - self.burn_start_time
