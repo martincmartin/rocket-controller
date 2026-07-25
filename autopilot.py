@@ -122,6 +122,7 @@ import numpy as np
 from numpy.typing import NDArray
 from scipy.spatial.transform import Rotation
 
+from krpc_batch import ControlSender
 from KSPUtils import KSPStreams
 
 Vector = NDArray[np.float64]
@@ -275,6 +276,13 @@ class CustomAutopilot:
         Cutoff frequency (Hz) of the exponential low-pass filter applied to
         the raw ``angular_velocity`` stream before it's used by the control
         law, to reduce oscillation.
+    send_controls : ControlSender | None
+        Callable ``(pitch, roll, yaw) -> None`` used to apply the computed
+        commands. Defaults to ``None``, which falls back to three plain
+        sequential attribute assignments (``vessel.control.pitch = ...``
+        etc.) -- the historical behavior. Production callers should pass
+        ``krpc_batch.make_batched_control_sender(conn, vessel.control)`` to
+        apply all three in a single kRPC round trip (see PLAN.md).
     """
 
     def __init__(
@@ -286,9 +294,11 @@ class CustomAutopilot:
         sat_roll_rate_deg_s: float = 5.0,
         omega_n_max: float = 5.0,
         cutoff_freq_hz: float = 3.0,
+        send_controls: ControlSender | None = None,
     ) -> None:
         self._ks = ks
         self._vessel = vessel
+        self._send_controls = send_controls or self._send_controls_plain
 
         # ── Register streams on the shared KSPStreams object ───────────────
         ks.add_stream("rotation", vessel.rotation, frame)
@@ -434,6 +444,10 @@ class CustomAutopilot:
         yaw_c = _torque_to_command(tau_yaw, torque_pos[2], torque_neg[2])
 
         # ── Apply commands ───────────────────────────────────────────────
-        self._vessel.control.pitch = pitch_c
-        self._vessel.control.roll = roll_c
-        self._vessel.control.yaw = yaw_c
+        self._send_controls(pitch_c, roll_c, yaw_c)
+
+    def _send_controls_plain(self, pitch: float, roll: float, yaw: float) -> None:
+        """Default ``send_controls``: three plain sequential assignments."""
+        self._vessel.control.pitch = pitch
+        self._vessel.control.roll = roll
+        self._vessel.control.yaw = yaw

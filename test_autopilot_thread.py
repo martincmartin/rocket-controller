@@ -101,13 +101,31 @@ class FakeConnection:
         self.closed = True
 
 
+def _fake_control_sender_factory(
+    conn: Any, control: Any
+) -> Callable[[float, float, float], None]:
+    """Reproduces today's plain three-assignment behavior against
+    FakeControl, since FakeConnection has no _build_call/_types/etc. for
+    the real batched sender to use."""
+
+    def set_all(pitch: float, roll: float, yaw: float) -> None:
+        control.pitch = pitch
+        control.roll = roll
+        control.yaw = yaw
+
+    return set_all
+
+
 def _make_worker() -> tuple[AutopilotWorker, FakeConnection]:
     conn = FakeConnection()
 
     def fake_connect(**kwargs: Any) -> FakeConnection:
         return conn
 
-    worker = AutopilotWorker(connect=fake_connect)
+    worker = AutopilotWorker(
+        connect=fake_connect,
+        control_sender_factory=_fake_control_sender_factory,
+    )
     return worker, conn
 
 
