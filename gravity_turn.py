@@ -227,9 +227,11 @@ class GravityTurn:
             vessel.auto_pilot.target_pitch_and_heading(90, self.HEADING)
             vessel.auto_pilot.target_roll = 90
 
-    def stage_if_needed(self) -> None:
+    def stage_if_needed(self) -> bool:
         streams = self.fs.streams
         if streams.available_thrust == 0 and streams.current_stage > 0:
+            self.fs.vessel.control.throttle = 0.0
+
             # Disable the attitude-control worker (if one is running, i.e.
             # we're in CIRCULARIZE) for the duration of the staging event:
             # decoupler force / new engine spool-up / gimbal-torque changes
@@ -250,8 +252,9 @@ class GravityTurn:
             if streams.available_thrust == 0 and streams.current_stage > 0:
                 self.fs.vessel.control.activate_next_stage()
                 print("  ⚡ ENGINE IGNITION")
-                time.sleep(0.3)
                 streams.next()
+            return True
+        return False
 
     def ascent(self) -> None:
         if self.phase != Phase.ASCENT:
@@ -293,7 +296,8 @@ class GravityTurn:
             # 1× physics warp when close.
             self.fs.space_center.physics_warp_factor = 0
 
-        self.stage_if_needed()
+        if self.stage_if_needed():
+            vessel.control.throttle = 1.0
 
         apoapsis = self.fs.streams.apoapsis
         print(
@@ -356,7 +360,8 @@ class GravityTurn:
         self.burn_start_time = self.plan.coast_time + self.ut0
         end_wall = time.perf_counter()
         print(
-            f"Plan time: {(end_wall - start_wall) * 1000.0:>5.0f} ({(after_find_wall - before_find_wall) * 1000.0:>5.0f})ms"
+            f"Plan time: {(end_wall - start_wall) * 1000.0:>5.0f} ({(after_find_wall - before_find_wall) * 1000.0:>5.0f})ms",
+            end="",
         )
 
         assert self.worker is not None
@@ -445,7 +450,9 @@ class GravityTurn:
             thrust_dir_2d = np.array([math.cos(theta), math.sin(theta)])
             thrust_dir = self.plan.plane.from_plane(thrust_dir_2d)
 
-            self.stage_if_needed()
+            if self.stage_if_needed():
+                self.segments = build_segments(self.fs.vessel)
+                self.plan_circularization()
 
             angle_error = math.degrees(math.acos(np.dot(streams.direction, thrust_dir)))
             target_apoapsis = self.plan.final_apoapsis_altitude
