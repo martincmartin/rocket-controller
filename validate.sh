@@ -36,9 +36,9 @@ run() {
 
 run "ruff format --check" ruff format --check .
 run "ruff check" ruff check .
-run "mypy --strict sim.py" mypy --strict sim.py
-run "pyright --warnings sim.py" pyright --warnings sim.py
-run "pytest" python3 -m pytest test_sim.py test_autopilot.py test_KSPUtils.py -v
+run "mypy --strict" mypy --strict sim.py KSPUtils.py autopilot_thread.py guidance_link.py autopilot.py gravity_turn.py
+run "pyright --warnings" pyright --warnings sim.py KSPUtils.py autopilot_thread.py guidance_link.py  autopilot.py gravity_turn.py
+run "pytest" python3 -m pytest test_sim.py test_autopilot.py test_KSPUtils.py test_guidance_link.py test_autopilot_thread.py -v
 
 echo
 if [[ ${#failed[@]} -eq 0 ]]; then

@@ -7,19 +7,22 @@ from collections.abc import Callable
 from typing import Any
 
 import krpc
+import krpc.client
+import krpc.services.spacecenter
 import numpy as np
 from krpc.services.spacecenter import Vessel
 
-from autopilot import CustomAutopilot
+from autopilot_thread import AutopilotWorker
+from guidance_link import GuidanceCommand
 from KSPUtils import KSPStreams, build_segments
 from sim import Simulator
 
 
-def engine_repr(engine):
-    return engine.part.title
+def engine_repr(engine: Any) -> str:
+    return engine.part.title  # type: ignore[no-any-return]
 
 
-krpc.services.spacecenter.Engine.__repr__ = engine_repr
+krpc.services.spacecenter.Engine.__repr__ = engine_repr  # type: ignore[method-assign]
 
 
 class FlightSession:
@@ -31,12 +34,20 @@ class FlightSession:
         self._ready = False  # True only strictly inside the `with` block
         self._vessel: Vessel | None = None
 
+    @property
+    def space_center(self) -> Any:
+        # kRPC's Client.space_center is only Optional in its type stubs
+        # because of a try/except ImportError fallback; it is always
+        # populated on a real connection.
+        assert self.conn.space_center is not None
+        return self.conn.space_center
+
     def __enter__(self) -> "FlightSession":
         self._vessel = self._wait_for_vessel(self.conn)
         self._vessel.control.sas = False
         self._vessel.control.rcs = False
 
-        if self._vessel.situation == self.conn.space_center.VesselSituation.pre_launch:
+        if self._vessel.situation == self.space_center.VesselSituation.pre_launch:
             self._vessel.auto_pilot.stopping_time = (0.5, 0.5, 0.5)
             self._vessel.auto_pilot.reference_frame = (
                 self._vessel.surface_reference_frame
@@ -44,7 +55,7 @@ class FlightSession:
             self._vessel.auto_pilot.target_pitch_and_heading(90, 90)
             self._vessel.auto_pilot.target_roll = 90
 
-            self.conn.space_center.physics_warp_factor = 0
+            self.space_center.physics_warp_factor = 0
 
         self.streams = KSPStreams(self.conn)
         self._ready = True
@@ -59,7 +70,12 @@ class FlightSession:
             )
         return self._vessel
 
-    def __exit__(self, exc_type, exc, tb) -> None:
+    def __exit__(
+        self,
+        exc_type: type[BaseException] | None,
+        exc: BaseException | None,
+        tb: Any,
+    ) -> None:
         self.close()
 
     def close(self) -> None:
@@ -77,7 +93,7 @@ class FlightSession:
             self._try(lambda: setattr(vessel.auto_pilot, "target_roll", 90.0))
             self._try(lambda: vessel.auto_pilot.target_pitch_and_heading(90, 90))
             self._try(vessel.auto_pilot.disengage)
-        self._try(lambda: setattr(self.conn.space_center, "physics_warp_factor", 0))
+        self._try(lambda: setattr(self.space_center, "physics_warp_factor", 0))
 
         self._try(self.streams.close)
 
@@ -100,7 +116,7 @@ class FlightSession:
                 # stale/leftover active_vessel while the scene itself is still
                 # transitioning (e.g. mid-load()).
                 if conn.krpc.current_game_scene == flight_scene:
-                    return conn.space_center.active_vessel
+                    return conn.space_center.active_vessel  # type: ignore[no-any-return]
             except Exception:
                 pass  # scene mid-transition
             time.sleep(cls.POLL_INTERVAL)
@@ -127,7 +143,12 @@ class GravityTurn:
 
     STAGING_DURATION = 2.5  # seconds; measured real-world KSP staging delay
 
-    def __init__(self, fs: FlightSession, turn_start_alt=100, turn_end_alt=30_000):
+    def __init__(
+        self,
+        fs: FlightSession,
+        turn_start_alt: float = 100,
+        turn_end_alt: float = 30_000,
+    ) -> None:
         self.fs = fs
 
         self.phase: Phase = Phase.INIT
@@ -141,6 +162,10 @@ class GravityTurn:
         self.turn_start_alt = turn_start_alt
         self.turn_end_alt = turn_end_alt
         self.prev_pitch: float = 0.0  # last commanded ascent pitch
+
+        # Circularization; created on demand in circularize(), stopped
+        # when CIRCULARIZE is left (success or otherwise) -- see do_it().
+        self.worker: AutopilotWorker | None = None
 
     def do_it(self) -> None:
         # Reference body parameters (Kerbin)
@@ -162,25 +187,36 @@ class GravityTurn:
         streams.add_stream("current_stage", getattr, vessel.control, "current_stage")
         streams.start()
 
-        pre_launch_situation = self.fs.conn.space_center.VesselSituation.pre_launch
+        pre_launch_situation = self.fs.space_center.VesselSituation.pre_launch
 
-        while True:
-            streams.next()
+        try:
+            while True:
+                streams.next()
 
-            if vessel.situation == pre_launch_situation:
-                self.prelaunch()
-            elif streams.apoapsis < self.ENGINE_CUTOFF_ALTITUDE:
-                self.ascent()
-            elif streams.altitude < self.ATMOSPHERE_ALTITUDE:
-                self.atmosphere_coast()
-            elif self.eccentricity_decreasing():
-                self.circularize()
-            else:
-                print("\nDone.")
-                vessel.control.sas = True
-                return
+                if vessel.situation == pre_launch_situation:
+                    self.prelaunch()
+                elif streams.apoapsis < self.ENGINE_CUTOFF_ALTITUDE:
+                    self.ascent()
+                elif streams.altitude < self.ATMOSPHERE_ALTITUDE:
+                    self.atmosphere_coast()
+                elif self.eccentricity_decreasing():
+                    self.circularize()
+                    if self.worker is not None and self.worker.error is not None:
+                        print(f"\nAutopilot worker failed: {self.worker.error}")
+                        vessel.control.throttle = 0.0
+                        return
+                else:
+                    print("\nDone.")
+                    vessel.control.sas = True
+                    return
+        finally:
+            # Ensure the worker thread/connection are always torn down, even
+            # on an early return or an exception unwinding out of do_it().
+            if self.worker is not None:
+                self.worker.stop()
+                self.worker = None
 
-    def prelaunch(self):
+    def prelaunch(self) -> None:
         if self.fs.streams.available_thrust == 0:
             vessel = self.fs.vessel
             vessel.control.sas = False
@@ -191,14 +227,25 @@ class GravityTurn:
             vessel.auto_pilot.target_pitch_and_heading(90, self.HEADING)
             vessel.auto_pilot.target_roll = 90
 
-    def stage_if_needed(self):
+    def stage_if_needed(self) -> None:
         streams = self.fs.streams
         if streams.available_thrust == 0 and streams.current_stage > 0:
+            # Disable the attitude-control worker (if one is running, i.e.
+            # we're in CIRCULARIZE) for the duration of the staging event:
+            # decoupler force / new engine spool-up / gimbal-torque changes
+            # aren't accounted for by the controller, and the main thread is
+            # about to block in time.sleep() through the event anyway. See
+            # PLAN.md §8.4. We don't re-enable at the end of the staging
+            # event -- the next planning loop iteration will naturally
+            # publish a fresh GuidanceCommand.
+            if self.worker is not None:
+                self.worker.link.set(None)
             # time.sleep(0.5)  # brief pause so decouplers don't double-fire
             self.fs.vessel.control.activate_next_stage()
             print("\n  ⚡ STAGE SEPARATION")
             time.sleep(0.5)
-            # Some craft designs need a second activation (e.g. decouple then ignite)
+            # Some craft designs need a second activation (e.g.
+            # decouple then ignite)
             streams.next()
             if streams.available_thrust == 0 and streams.current_stage > 0:
                 self.fs.vessel.control.activate_next_stage()
@@ -206,7 +253,7 @@ class GravityTurn:
                 time.sleep(0.3)
                 streams.next()
 
-    def ascent(self):
+    def ascent(self) -> None:
         if self.phase != Phase.ASCENT:
             self.phase = Phase.ASCENT
             vessel = self.fs.vessel
@@ -219,7 +266,7 @@ class GravityTurn:
             self.prev_pitch = 90
             vessel.auto_pilot.target_roll = 90
             # 2× physics warp during ascent
-            self.fs.conn.space_center.physics_warp_factor = 1
+            self.fs.space_center.physics_warp_factor = 1
 
         altitude = self.fs.streams.altitude
         if altitude < self.turn_start_alt:
@@ -244,7 +291,7 @@ class GravityTurn:
 
         if self.fs.streams.apoapsis > self.ENGINE_CUTOFF_ALTITUDE * self.AP_WARP_MARGIN:
             # 1× physics warp when close.
-            self.fs.conn.space_center.physics_warp_factor = 0
+            self.fs.space_center.physics_warp_factor = 0
 
         self.stage_if_needed()
 
@@ -257,13 +304,13 @@ class GravityTurn:
         )
 
     # Coasting out of atmosphere
-    def atmosphere_coast(self):
+    def atmosphere_coast(self) -> None:
         if self.phase != Phase.ATMOSPHERE_COAST:
             self.phase = Phase.ATMOSPHERE_COAST
             print("\nTarget apoapsis reached, coasting out of atmosphere.")
             self.fs.vessel.control.throttle = 0.0
             # 4× physics warp during coast
-            self.fs.conn.space_center.physics_warp_factor = 3
+            self.fs.space_center.physics_warp_factor = 3
 
     def eccentricity_decreasing(self) -> bool:
         # This formula looks like the one for a circular orbit, but it's actually much
@@ -275,9 +322,16 @@ class GravityTurn:
         streams = self.fs.streams
         speed = np.linalg.norm(streams.velocity)
         radius = np.linalg.norm(streams.position)
-        return speed * speed < self.mu / radius
+        return bool(speed * speed < self.mu / radius)
 
-    def plan_circularization(self):
+    def plan_circularization(self) -> None:
+        """Replan the circularization burn and publish the result to the
+        autopilot worker thread.
+
+        This can safely take a long time (50 ms+, several physics ticks) --
+        the worker thread keeps commanding attitude every tick from the
+        last-published GuidanceCommand regardless (see PLAN.md §5).
+        """
         start_wall = time.perf_counter()
         sim = Simulator(
             self.mu,
@@ -295,13 +349,28 @@ class GravityTurn:
         # Do we need ut0 for anything else?
         self.ut0 = streams.ut
 
+        before_find_wall = time.perf_counter()
         self.plan = sim.find_linear_tangent_params(r3d, v3d, tta, verbose=False)
+        after_find_wall = time.perf_counter()
 
         self.burn_start_time = self.plan.coast_time + self.ut0
         end_wall = time.perf_counter()
-        print(f"Plan time: {(end_wall - start_wall) * 1000.0:>5.0f} ms")
+        print(
+            f"Plan time: {(end_wall - start_wall) * 1000.0:>5.0f} ({(after_find_wall - before_find_wall) * 1000.0:>5.0f})ms"
+        )
 
-    def circularize(self):
+        assert self.worker is not None
+        self.worker.link.set(
+            GuidanceCommand(
+                ref_angle=self.plan.ref_angle,
+                a_coeff=self.plan.a_coeff,
+                b_coeff=self.plan.b_coeff,
+                t0=self.burn_start_time,
+                plane=self.plan.plane,
+            )
+        )
+
+    def circularize(self) -> None:
         streams = self.fs.streams
 
         if self.phase != Phase.CIRCULARIZE:
@@ -310,9 +379,12 @@ class GravityTurn:
 
             vessel.auto_pilot.disengage()
             vessel.control.sas = False
-            self.autopilot = CustomAutopilot(
-                streams, vessel, self.frame, sat_angle_deg=5.0
-            )
+
+            # The attitude-control law runs on its own thread, over its own
+            # kRPC connection, so replanning below (which can take multiple
+            # physics ticks) never starves it. See PLAN.md.
+            self.worker = AutopilotWorker(sat_angle_deg=5.0)
+            self.worker.start()
 
             # Will we get more accurate thrust direction vector if we only use reaction
             # wheel for direction, not gimballing?  Let's find out.
@@ -333,27 +405,23 @@ class GravityTurn:
             coast_time = self.burn_start_time - streams.ut
 
             if coast_time <= 10.0:
-                self.fs.conn.space_center.physics_warp_factor = 0
+                self.fs.space_center.physics_warp_factor = 0
             else:
-                self.fs.conn.space_center.physics_warp_factor = 3
+                self.fs.space_center.physics_warp_factor = 3
 
         # Coast or burn?
         if self.burn_start_time > streams.ut:
             coast_time = self.burn_start_time - streams.ut
 
             if coast_time <= 10.0:
-                self.fs.conn.space_center.physics_warp_factor = 0
+                self.fs.space_center.physics_warp_factor = 0
 
-            # Point toward the burn's initial attitude while coasting, so the craft has
-            # time to rotate into position before ignition.  theta is the steering angle
-            # at the very start of the burn (t=0).
+            # theta is the steering angle at the very start of the burn
+            # (t=0); the worker thread is already pointing there (and will
+            # keep doing so until burn_start_time) via evaluate_target().
             theta = self.plan.ref_angle + math.atan(self.plan.a_coeff)
             thrust_dir_2d = np.array([math.cos(theta), math.sin(theta)])
             thrust_dir = self.plan.plane.from_plane(thrust_dir_2d)
-
-            self.autopilot.update(
-                target_dir=thrust_dir, target_dir_dot=np.array([0, 0, 0])
-            )
 
             angle_error = math.degrees(math.acos(np.dot(streams.direction, thrust_dir)))
 
@@ -364,8 +432,9 @@ class GravityTurn:
                 flush=True,
             )
 
-            # Replan.  This takes a long time (50 ms +) so make sure you update the
-            # autopilot before calling this.
+            # Replan. This can take a long time (50 ms+); the worker thread
+            # keeps commanding attitude from the previous plan while this
+            # runs, so there's no need to update it first.
             self.plan_circularization()
 
         else:
@@ -376,13 +445,6 @@ class GravityTurn:
             thrust_dir_2d = np.array([math.cos(theta), math.sin(theta)])
             thrust_dir = self.plan.plane.from_plane(thrust_dir_2d)
 
-            # Analytical derivative of the steering direction.
-            #   d/dt atan(a + b*t) = b / (1 + (a + b*t)^2)
-            dtheta_dt = self.plan.b_coeff / (1.0 + tan_val**2)
-            thrust_dir_dot = self.plan.plane.from_plane(
-                np.array([-math.sin(theta) * dtheta_dt, math.cos(theta) * dtheta_dt])
-            )
-            self.autopilot.update(target_dir=thrust_dir, target_dir_dot=thrust_dir_dot)
             self.stage_if_needed()
 
             angle_error = math.degrees(math.acos(np.dot(streams.direction, thrust_dir)))
@@ -397,7 +459,7 @@ class GravityTurn:
             )
 
 
-def main():
+def main() -> None:
     print("Connecting to kRPC server…")
     conn = krpc.connect(name="Gravity Turn")
 

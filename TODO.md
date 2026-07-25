@@ -11,9 +11,10 @@
 
 - Recompute again after burn starts, maybe lowering target altitude threshold a little.
 
-- If a second reader thread is ever introduced anywhere in this codebase,
-  remember the lock-ordering deadlock risk from holding multiple streams'
-  `.condition`s at once.
-  Acquire them in one consistent order (e.g. sorted by `id()`) rather than
-  however each caller happens to list them, or route multi-condition reads
-  through a single gatekeeper lock.
+- If any second reader thread is ever introduced sharing a
+  `KSPStreams`/connection with an existing one, remember the lock-ordering
+  deadlock risk from holding multiple streams' `.condition`s at once.  Acquire
+  them in one consistent order (e.g. sorted by `id()`) rather than however each
+  caller happens to list them, or route multi-condition reads through a single
+  gatekeeper lock.  Or better, just use a separate kRPC connection for each
+  thread, as these connections block until they get a reply.

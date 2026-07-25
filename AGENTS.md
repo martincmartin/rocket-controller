@@ -8,6 +8,8 @@ After making code changes, run:
 
 Checks format, lint, typing and runs tests.
 
+Add any new non-test .py files to mypy and pyright in validate.sh.
+
 # Formatting
 use `ruff format .` for formatting all Python files, and
 `ruff check --fix .` to auto-fix lint findings (rule set configured in

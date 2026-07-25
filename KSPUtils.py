@@ -33,6 +33,7 @@ from typing import Any
 
 import krpc
 import krpc.client
+import krpc.error
 
 from sim import RocketSegment
 
@@ -198,14 +199,16 @@ class EngineGroup:
 
     __slots__ = ("flow_rate", "fuel_duration", "name", "thrust")
 
-    def __init__(self, name, thrust, flow_rate, fuel_duration):
+    def __init__(
+        self, name: str, thrust: float, flow_rate: float, fuel_duration: float
+    ) -> None:
         self.name = name  # representative engine's part.title
         self.thrust = thrust  # N
         self.flow_rate = flow_rate  # kg/s
         self.fuel_duration = fuel_duration  # seconds until limiting propellant depletes
 
 
-def _engine_group_stats(engines):
+def _engine_group_stats(engines: list[Any]) -> EngineGroup | None:
     """Compute performance stats for a group of engines sharing fuel.
 
     Returns a dict with thrust (N), isp (s), ve (m/s), flow_rate (kg/s),
@@ -266,7 +269,9 @@ def _engine_group_stats(engines):
     return EngineGroup(rep.part.title, thrust, flow_rate, fuel_dur)
 
 
-def _discover_engine_groups(vessel, active_only=True, stage_filter=None):
+def _discover_engine_groups(
+    vessel: Any, active_only: bool = True, stage_filter: int | None = None
+) -> list[EngineGroup]:
     """Group engines by (decouple_stage, propellant types).
 
     Args:
@@ -276,7 +281,7 @@ def _discover_engine_groups(vessel, active_only=True, stage_filter=None):
 
     Returns a list of engine-group dicts (see ``_engine_group_stats``).
     """
-    by_key = {}
+    by_key: dict[tuple[int, frozenset[str]], list[Any]] = {}
     for engine in vessel.parts.engines:
         if active_only and (not engine.active or not engine.has_fuel):
             continue
@@ -299,7 +304,7 @@ def _discover_engine_groups(vessel, active_only=True, stage_filter=None):
     return groups
 
 
-def build_segments(vessel) -> list[RocketSegment]:
+def build_segments(vessel: Any) -> list[RocketSegment]:
     """Build the list of sim.RocketSegment instances describing the
     vessel's remaining engine/fuel state, for use with Simulator.
 
