@@ -297,7 +297,7 @@ class GravityTurn:
             self.fs.space_center.physics_warp_factor = 0
 
         if self.stage_if_needed():
-            vessel.control.throttle = 1.0
+            self.fs.vessel.control.throttle = 1.0
 
         apoapsis = self.fs.streams.apoapsis
         print(
@@ -360,7 +360,8 @@ class GravityTurn:
         self.burn_start_time = self.plan.coast_time + self.ut0
         end_wall = time.perf_counter()
         print(
-            f"Plan time: {(end_wall - start_wall) * 1000.0:>5.0f} ({(after_find_wall - before_find_wall) * 1000.0:>5.0f})ms",
+            f"Plan time: {(end_wall - start_wall) * 1000.0:>5.0f} "
+            f"({(after_find_wall - before_find_wall) * 1000.0:>5.0f})ms  ",
             end="",
         )
 
