@@ -10,6 +10,7 @@ import numpy as np
 import pytest
 
 from autopilot import (
+    UNWARPED_PHYSICS_TIMESTEP,
     CustomAutopilot,
     _low_pass_update,
     _omega_n_sat,
@@ -167,8 +168,20 @@ def _make_autopilot(
     ang_vel: tuple[float, float, float] = (0.0, 0.0, 0.0),
     ut: float = 0.0,
     cutoff_freq_hz: float = 1.0,
+    sat_angle_deg: float | None = None,
+    omega_n_max_normalized: float | None = None,
 ) -> tuple[CustomAutopilot, FakeKSPStreams, FakeVessel]:
-    """Build a CustomAutopilot backed by a FakeKSPStreams."""
+    """Build a CustomAutopilot backed by a FakeKSPStreams.
+
+    ``cutoff_freq_hz`` is converted to the ``ticks_per_filter_cycle``
+    parameter now used by ``CustomAutopilot``, preserving the same
+    low-pass-filter behavior as before: alpha = 1 - exp(-2*pi*fc*dt)
+    == 1 - exp(-2*pi/ticks_per_filter_cycle) when
+    ticks_per_filter_cycle == 1 / (fc * dt).
+
+    ``sat_angle_deg`` and ``omega_n_max_normalized`` are passed through
+    unchanged (to ``CustomAutopilot``'s own defaults if left ``None``).
+    """
     ks = FakeKSPStreams(
         rotation=rotation,
         ang_vel=ang_vel,
@@ -178,7 +191,15 @@ def _make_autopilot(
     )
     vessel = FakeVessel()
     frame = object()
-    ap = CustomAutopilot(ks, vessel, frame, cutoff_freq_hz=cutoff_freq_hz)
+    ticks_per_filter_cycle = 1.0 / (cutoff_freq_hz * UNWARPED_PHYSICS_TIMESTEP)
+    kwargs: dict[str, float] = {}
+    if sat_angle_deg is not None:
+        kwargs["sat_angle_deg"] = sat_angle_deg
+    if omega_n_max_normalized is not None:
+        kwargs["omega_n_max_normalized"] = omega_n_max_normalized
+    ap = CustomAutopilot(
+        ks, vessel, frame, ticks_per_filter_cycle=ticks_per_filter_cycle, **kwargs
+    )
     return ap, ks, vessel
 
 
@@ -402,7 +423,12 @@ class TestCustomAutopilot:
         zero, giving no signal to correct on. A target perpendicular to the
         nose avoids that singularity while still being a \"large\" error.
         """
-        ap, _ks, vessel = _make_autopilot()
+        # The (deliberately conservative) class defaults cap omega_n low
+        # enough that this synthetic torque/inertia combo wouldn't actually
+        # saturate; use an omega_n_max_normalized corresponding to the
+        # previous default (omega_n_max=5.0 at dt=0.02) to exercise the
+        # saturation path being tested here.
+        ap, _ks, vessel = _make_autopilot(omega_n_max_normalized=5.0 * 0.02)
         # Point 90° away from the nose, in the pitch plane.
         target_dir = np.array([0.0, 0.0, 1.0])
         target_dir_dot = np.zeros(3)

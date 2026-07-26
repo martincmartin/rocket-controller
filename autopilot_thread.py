@@ -62,7 +62,6 @@ class AutopilotWorker:
     def __init__(
         self,
         name: str = DEFAULT_NAME,
-        sat_angle_deg: float = 5.0,
         connect: Callable[..., krpc.client.Client] = krpc.connect,
         connect_kwargs: dict[str, Any] | None = None,
         control_sender_factory: Callable[
@@ -70,7 +69,6 @@ class AutopilotWorker:
         ] = make_batched_control_sender,
     ) -> None:
         self._name = name
-        self._sat_angle_deg = sat_angle_deg
         self._connect = connect
         self._connect_kwargs = connect_kwargs or {}
         self._control_sender_factory = control_sender_factory
@@ -124,7 +122,6 @@ class AutopilotWorker:
             streams,
             vessel,
             frame,
-            sat_angle_deg=self._sat_angle_deg,
             send_controls=send_controls,
         )
         streams.start()

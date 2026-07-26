@@ -130,6 +130,11 @@ Vector = NDArray[np.float64]
 
 UNWARPED_PHYSICS_TIMESTEP = 0.02  # seconds
 
+
+def clip(a: float, a_min: float, a_max: float) -> float:
+    return min(a_max, max(a, a_min))
+
+
 # ─── Pure physics/gain helper functions ───────────────────────────────────────
 
 
@@ -264,18 +269,23 @@ class CustomAutopilot:
         (``body.non_rotating_reference_frame``).
     sat_angle_deg : float
         Angle (degrees) at which the pitch/yaw controllers saturate
-        (``c = ±1``) when the rate error is zero.
+        (``c = ±1``) when the rate error is zero.  Lower value is more aggressive.
+        If the vessel is oscillating, try increasing it.
     sat_roll_rate_deg_s : float
         Roll angular velocity (degrees/second) at which the roll controller
         saturates (``c = ±1``).
-    omega_n_max : float
-        Hard upper bound on the natural frequency (rad/s) for pitch/yaw, and
+    omega_n_max_normalized : float
+        Hard upper bound on the natural frequency (rad/s) times the physics timestep
+        (0.02 at 1x warp, 0.08 at 4x warp) for pitch/yaw, and
         on the rate-feedback gain (1/s) for roll.  Must be less than
         ``1 / (10 * dt)`` for numerical stability given the physics tick.
-    cutoff_freq_hz : float
-        Cutoff frequency (Hz) of the exponential low-pass filter applied to
+    ticks_per_filter_cycle: float
+        The cutoff frequency is the game tick rate (50 Hz at 1x warp, 12.5 Hz
+        at 4x warp) divided by this, of the exponential low-pass filter applied to
         the raw ``angular_velocity`` stream before it's used by the control
-        law, to reduce oscillation.
+        law, to reduce oscillation.  Lower value is less filtering and more delay,
+        higher value is more filtering and therefore more delay.  If the vessel
+        or controls wobble, try increasing this.
     send_controls : ControlSender | None
         Callable ``(pitch, roll, yaw) -> None`` used to apply the computed
         commands. Defaults to ``None``, which falls back to three plain
@@ -290,10 +300,10 @@ class CustomAutopilot:
         ks: KSPStreams,
         vessel: Any,
         frame: Any,
-        sat_angle_deg: float = 5.0,
+        sat_angle_deg: float = 1.0,
         sat_roll_rate_deg_s: float = 5.0,
-        omega_n_max: float = 5.0,
-        cutoff_freq_hz: float = 3.0,
+        omega_n_max_normalized: float = 1.0 * 0.02,
+        ticks_per_filter_cycle: float = 10.0,
         send_controls: ControlSender | None = None,
     ) -> None:
         self._ks = ks
@@ -314,22 +324,15 @@ class CustomAutopilot:
 
         self._sat_angle_rad = math.radians(sat_angle_deg)
         self._sat_roll_rate_rad_s = math.radians(sat_roll_rate_deg_s)
-        self._omega_n_max = omega_n_max
+        self._omega_n_max_normalized = omega_n_max_normalized
         self.pitch_max = False
         self.yaw_max = False
 
         # ── Angular-velocity low-pass filter state ─────────────────────────
-        # tau_filter = 1 / (2*pi*fc); alpha computed fresh each tick from the
-        # actual dt (self._ks.ut - self._last_ut), since KSP physics ticks
-        # aren't perfectly uniform.
-        self._alpha_filter = 1.0 - math.exp(
-            -2.0 * math.pi * cutoff_freq_hz * UNWARPED_PHYSICS_TIMESTEP
-        )
+        self._alpha_filter = 1.0 - math.exp(-2.0 * math.pi / ticks_per_filter_cycle)
         print(f"alpha filter: {self._alpha_filter}")
         self._filtered_ang_vel_world: Vector | None = None
         self._last_ut: float | None = None
-
-        print(f"cutoff freq: {cutoff_freq_hz}, alpha: {self._alpha_filter}")
 
     def update(
         self,
@@ -355,6 +358,9 @@ class CustomAutopilot:
         # These values were captured atomically by the caller's ks.next() call,
         # so all streams are guaranteed to be from the same physics tick.
         ut = self._ks.ut
+        delta_t = clip(ut - self._last_ut, 0.02, 0.08) if self._last_ut else 0.02
+        self._last_ut = ut
+
         quat = self._ks.rotation  # (x, y, z, w) — scipy order
         ang_vel_world_measured = np.array(self._ks.angular_velocity)
         torque_pos, torque_neg = self._ks.available_torque
@@ -365,14 +371,14 @@ class CustomAutopilot:
         # ── Low-pass filter the angular velocity in the (non-rotating)
         # world frame, before rotating it into the (rotating) vessel frame.
         # See module docstring for why the filter must be applied here.
-        if self._last_ut is None or self._filtered_ang_vel_world is None:
+        if self._filtered_ang_vel_world is None:
             ang_vel_world = ang_vel_world_measured
         else:
             ang_vel_world = _low_pass_update(
                 ang_vel_world_measured, self._filtered_ang_vel_world, self._alpha_filter
             )
+
         self._filtered_ang_vel_world = ang_vel_world
-        self._last_ut = ut
 
         world_to_vessel = Rotation.from_quat(quat).inv()
 
@@ -405,21 +411,21 @@ class CustomAutopilot:
             torque_neg[0],
             inertia_tensor[0, 0],
             self._sat_angle_rad,
-            self._omega_n_max,
+            self._omega_n_max_normalized / delta_t,
         )
         omega_n_yaw, self.yaw_max = _omega_n_sat(
             torque_pos[2],
             torque_neg[2],
             inertia_tensor[2, 2],
             self._sat_angle_rad,
-            self._omega_n_max,
+            self._omega_n_max_normalized / delta_t,
         )
         lambda_roll = _rate_gain_sat(
             torque_pos[1],
             torque_neg[1],
             inertia_tensor[1, 1],
             self._sat_roll_rate_rad_s,
-            self._omega_n_max,
+            self._omega_n_max_normalized / delta_t,
         )
 
         # ── Desired angular accelerations ──────────────────────────────────

@@ -389,7 +389,7 @@ class GravityTurn:
             # The attitude-control law runs on its own thread, over its own
             # kRPC connection, so replanning below (which can take multiple
             # physics ticks) never starves it. See PLAN.md.
-            self.worker = AutopilotWorker(sat_angle_deg=5.0)
+            self.worker = AutopilotWorker()
             self.worker.start()
 
             # Will we get more accurate thrust direction vector if we only use reaction
