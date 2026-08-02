@@ -102,7 +102,7 @@ class FlightSession:
             self._try(lambda: setattr(vessel.control, "rcs", False))
             self._try(lambda: setattr(vessel.auto_pilot, "target_roll", 90.0))
             self._try(lambda: vessel.auto_pilot.target_pitch_and_heading(90, 90))
-            self._try(vessel.auto_pilot.disengage)
+            self._try(lambda: setattr(vessel.auto_pilot, 'engaged', False))
         self._try(lambda: setattr(self.space_center, "physics_warp_factor", 0))
 
         self._try(self.streams.close)
@@ -265,7 +265,7 @@ class GravityTurn:
             vessel.control.rcs = False
             vessel.control.throttle = self.ascent_throttle
             vessel.control.activate_next_stage()
-            vessel.auto_pilot.engage()
+            vessel.auto_pilot.engaged = True
             vessel.auto_pilot.target_pitch_and_heading(90, self.HEADING)
             vessel.auto_pilot.target_roll = 90
 
@@ -303,7 +303,7 @@ class GravityTurn:
             self.phase = Phase.ASCENT
             vessel = self.fs.vessel
 
-            vessel.auto_pilot.engage()
+            vessel.auto_pilot.engaged = True
             vessel.control.sas = False
             vessel.control.rcs = False
             vessel.control.throttle = self.ascent_throttle
@@ -416,7 +416,7 @@ class GravityTurn:
             self.phase = Phase.CIRCULARIZE
             vessel = self.fs.vessel
 
-            vessel.auto_pilot.disengage()
+            vessel.auto_pilot.engaged = False
             vessel.control.sas = False
             vessel.control.throttle = 0.0
 
@@ -521,6 +521,7 @@ def objective(params: Vector, conn) -> float:
 
     # conn.space_center.revert_to_launch() leaks a lot, eventually slowing down the game
     # a lot.  So we'll load a save instead, "ReadyToLaunch".
+    conn.space_center.revert_to_launch()
     time.sleep(7)
 
     with FlightSession(conn) as fs:
