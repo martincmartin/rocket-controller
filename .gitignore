@@ -6,3 +6,5 @@ __pycache__/
 PLAN.md
 explore.py
 step-control.csv
+mutagen.yml
+mutagen.yml.lock
