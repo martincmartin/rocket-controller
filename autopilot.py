@@ -330,7 +330,6 @@ class CustomAutopilot:
 
         # ── Angular-velocity low-pass filter state ─────────────────────────
         self._alpha_filter = 1.0 - math.exp(-2.0 * math.pi / ticks_per_filter_cycle)
-        print(f"alpha filter: {self._alpha_filter}")
         self._filtered_ang_vel_world: Vector | None = None
         self._last_ut: float | None = None
 

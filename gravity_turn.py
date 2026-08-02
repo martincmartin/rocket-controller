@@ -4,18 +4,23 @@ import enum
 import math
 import time
 from collections.abc import Callable
+from dataclasses import dataclass
 from typing import Any
 
 import krpc
 import krpc.client
 import krpc.services.spacecenter
 import numpy as np
+import scipy
 from krpc.services.spacecenter import Vessel
+from numpy.typing import NDArray
 
 from autopilot_thread import AutopilotWorker
 from guidance_link import GuidanceCommand
 from KSPUtils import KSPStreams, build_segments
 from sim import Simulator
+
+Vector = NDArray[np.float64]
 
 
 def engine_repr(engine: Any) -> str:
@@ -23,6 +28,11 @@ def engine_repr(engine: Any) -> str:
 
 
 krpc.services.spacecenter.Engine.__repr__ = engine_repr  # type: ignore[method-assign]
+
+
+@dataclass
+class FlightResult:
+    mass: float
 
 
 class FlightSession:
@@ -133,13 +143,9 @@ class Phase(enum.IntEnum):
 
 class GravityTurn:
     TARGET_ALTITUDE = 80_000  # Desired circular orbit altitude (m)
-    ENGINE_CUTOFF_ALTITUDE = 60_000  # Once apoapsis reaches this, cut engines.
     HEADING = 90  # Launch azimuth (90 = due east for equatorial orbit)
     AP_WARP_MARGIN = 0.90  # Turn off warp when Ap > this x target
-    AP_THROTTLE_MARGIN = 0.95  # Start tapering throttle when Ap > this × target
-    ATMOSPHERE_ALTITUDE = 25_000  # Kerbin atmosphere is 0.01 atm at 25k, 0.001 at 40k.
-    ECC_TOLERANCE = 0.1  # "circular enough" eccentricity to stop the burn
-    BURN_TIME_SAFETY_MARGIN = 1.5  # abort if we run this much past the plan
+    ATMOSPHERE_ALTITUDE = 30_000  # Kerbin atmosphere is 0.01 atm at 25k, 0.001 at 40k.
 
     STAGING_DURATION = 2.5  # seconds; measured real-world KSP staging delay
 
@@ -148,6 +154,9 @@ class GravityTurn:
         fs: FlightSession,
         turn_start_alt: float = 100,
         turn_end_alt: float = 30_000,
+        # Once apoapsis reaches this, cut engines.
+        engine_cutoff_altitude: float = 60_000,
+        ascent_throttle: float = 1.0,
     ) -> None:
         self.fs = fs
 
@@ -161,13 +170,19 @@ class GravityTurn:
         # Ascent
         self.turn_start_alt = turn_start_alt
         self.turn_end_alt = turn_end_alt
+        self.engine_cutoff_altitude = engine_cutoff_altitude
+        self.ascent_throttle = ascent_throttle
         self.prev_pitch: float = 0.0  # last commanded ascent pitch
 
         # Circularization; created on demand in circularize(), stopped
         # when CIRCULARIZE is left (success or otherwise) -- see do_it().
         self.worker: AutopilotWorker | None = None
 
-    def do_it(self) -> None:
+        self.print40k = False
+        self.print60k = False
+        self.print70k = False
+
+    def do_it(self) -> FlightResult | None:
         # Reference body parameters (Kerbin)
         vessel = self.fs.vessel
 
@@ -187,28 +202,55 @@ class GravityTurn:
         streams.add_stream("current_stage", getattr, vessel.control, "current_stage")
         streams.start()
 
-        pre_launch_situation = self.fs.space_center.VesselSituation.pre_launch
+        situations = self.fs.space_center.VesselSituation
+        pre_launch_situation = situations.pre_launch
+        sub_orbital_situation = situations.sub_orbital
+        orbiting_situation = situations.orbiting
+        flying_situation = situations.flying
 
         try:
             while True:
                 streams.next()
 
+                sit = vessel.situation
+
+                if not (
+                    sit == pre_launch_situation
+                    or sit == sub_orbital_situation
+                    or sit == orbiting_situation
+                    or sit == flying_situation
+                ):
+                    print(f"%%%%%%%%%% situation: {sit} !!!")
+                    return FlightResult(mass=0)
+
+                # could also say e.g. if altitude is < 70k and decreasing, "you're
+                # having a bad day and will not go to space today."
+
                 if vessel.situation == pre_launch_situation:
                     self.prelaunch()
-                elif streams.apoapsis < self.ENGINE_CUTOFF_ALTITUDE:
+                elif (
+                    streams.apoapsis < self.engine_cutoff_altitude
+                    and self.phase <= Phase.ASCENT
+                ):
                     self.ascent()
-                elif streams.altitude < self.ATMOSPHERE_ALTITUDE:
+                elif (
+                    streams.altitude < self.ATMOSPHERE_ALTITUDE
+                    and self.phase <= Phase.ATMOSPHERE_COAST
+                ):
                     self.atmosphere_coast()
                 elif self.eccentricity_decreasing():
-                    self.circularize()
+                    result = self.circularize()
                     if self.worker is not None and self.worker.error is not None:
                         print(f"\nAutopilot worker failed: {self.worker.error}")
                         vessel.control.throttle = 0.0
-                        return
+                        return None
+                    if result:
+                        return result
                 else:
                     print("\nDone.")
                     vessel.control.sas = True
-                    return
+                    print(f"mass: {vessel.mass}\n")
+                    return FlightResult(vessel.mass)
         finally:
             # Ensure the worker thread/connection are always torn down, even
             # on an early return or an exception unwinding out of do_it().
@@ -221,7 +263,7 @@ class GravityTurn:
             vessel = self.fs.vessel
             vessel.control.sas = False
             vessel.control.rcs = False
-            vessel.control.throttle = 1.0
+            vessel.control.throttle = self.ascent_throttle
             vessel.control.activate_next_stage()
             vessel.auto_pilot.engage()
             vessel.auto_pilot.target_pitch_and_heading(90, self.HEADING)
@@ -264,7 +306,7 @@ class GravityTurn:
             vessel.auto_pilot.engage()
             vessel.control.sas = False
             vessel.control.rcs = False
-            vessel.control.throttle = 1.0
+            vessel.control.throttle = self.ascent_throttle
             vessel.auto_pilot.target_pitch_and_heading(90, self.HEADING)
             self.prev_pitch = 90
             vessel.auto_pilot.target_roll = 90
@@ -292,7 +334,7 @@ class GravityTurn:
                 target_pitch, self.HEADING
             )
 
-        if self.fs.streams.apoapsis > self.ENGINE_CUTOFF_ALTITUDE * self.AP_WARP_MARGIN:
+        if self.fs.streams.apoapsis > self.engine_cutoff_altitude * self.AP_WARP_MARGIN:
             # 1× physics warp when close.
             self.fs.space_center.physics_warp_factor = 0
 
@@ -302,7 +344,7 @@ class GravityTurn:
         apoapsis = self.fs.streams.apoapsis
         print(
             f"\rPitch {target_pitch:>5.1f}  "
-            f"Apo {apoapsis:>5.0f}/{self.ENGINE_CUTOFF_ALTITUDE}  {phase_label}   ",
+            f"Apo {apoapsis:>5.0f}/{self.engine_cutoff_altitude}  {phase_label}   ",
             end="",
             flush=True,
         )
@@ -336,7 +378,6 @@ class GravityTurn:
         the worker thread keeps commanding attitude every tick from the
         last-published GuidanceCommand regardless (see PLAN.md §5).
         """
-        start_wall = time.perf_counter()
         sim = Simulator(
             self.mu,
             self.body_radius,
@@ -353,17 +394,9 @@ class GravityTurn:
         # Do we need ut0 for anything else?
         self.ut0 = streams.ut
 
-        before_find_wall = time.perf_counter()
         self.plan = sim.find_linear_tangent_params(r3d, v3d, tta, verbose=False)
-        after_find_wall = time.perf_counter()
 
         self.burn_start_time = self.plan.coast_time + self.ut0
-        end_wall = time.perf_counter()
-        print(
-            f"Plan time: {(end_wall - start_wall) * 1000.0:>5.0f} "
-            f"({(after_find_wall - before_find_wall) * 1000.0:>5.0f})ms  ",
-            end="",
-        )
 
         assert self.worker is not None
         self.worker.link.set(
@@ -376,7 +409,7 @@ class GravityTurn:
             )
         )
 
-    def circularize(self) -> None:
+    def circularize(self) -> FlightResult | None:
         streams = self.fs.streams
 
         if self.phase != Phase.CIRCULARIZE:
@@ -385,6 +418,7 @@ class GravityTurn:
 
             vessel.auto_pilot.disengage()
             vessel.control.sas = False
+            vessel.control.throttle = 0.0
 
             # The attitude-control law runs on its own thread, over its own
             # kRPC connection, so replanning below (which can take multiple
@@ -395,7 +429,7 @@ class GravityTurn:
             # Will we get more accurate thrust direction vector if we only use reaction
             # wheel for direction, not gimballing?  Let's find out.
             for e in vessel.parts.engines:
-                if e.active and e.has_fuel:
+                if e.active and e.has_fuel and e.gimballed:
                     print(f"Locking gimbal on {e.part.title}")
                     e.gimbal_locked = True
 
@@ -421,6 +455,17 @@ class GravityTurn:
 
             if coast_time <= 10.0:
                 self.fs.space_center.physics_warp_factor = 0
+
+            if not self.print40k and streams.altitude >= 40_000:
+                print(f"alt: {streams.altitude}, mass: {self.plan.burn_result.mass}")
+                self.print40k = True
+                return FlightResult(self.plan.burn_result.mass)
+            elif not self.print60k and streams.altitude >= 60_000:
+                print(f"alt: {streams.altitude}, mass: {self.plan.burn_result.mass}")
+                self.print60k = True
+            elif not self.print70k and streams.altitude >= 70_000:
+                print(f"alt: {streams.altitude}, mass: {self.plan.burn_result.mass}")
+                self.print70k = True
 
             # theta is the steering angle at the very start of the burn
             # (t=0); the worker thread is already pointing there (and will
@@ -467,12 +512,85 @@ class GravityTurn:
             )
 
 
+def objective(params: Vector, conn) -> float:
+    throttle, turn_start, turn_end, engine_cutoff_altitude = params
+    print(
+        f"**********  {throttle=}, {turn_start=}, {turn_end=}, "
+        f"{engine_cutoff_altitude=}"
+    )
+
+    # conn.space_center.revert_to_launch() leaks a lot, eventually slowing down the game
+    # a lot.  So we'll load a save instead, "ReadyToLaunch".
+    time.sleep(7)
+
+    with FlightSession(conn) as fs:
+        result = GravityTurn(
+            fs,
+            turn_start_alt=turn_start,
+            turn_end_alt=turn_end,
+            engine_cutoff_altitude=engine_cutoff_altitude,
+            ascent_throttle=throttle,
+        ).do_it()
+
+    print(
+        f"**********  np.array([{params[0]:.3f}, {params[1]:.2f}, "
+        f"{params[2]:.0f}, {params[3]:.0f}]), mass: {result.mass}"
+    )
+    return -result.mass
+
+
 def main() -> None:
     print("Connecting to kRPC server…")
     conn = krpc.connect(name="Gravity Turn")
 
-    with FlightSession(conn) as fs:
-        GravityTurn(fs, turn_start_alt=100, turn_end_alt=30_000).do_it()
+    # initial_params = np.array([100, 20_000, 60_000, 0.90])  # 3434 reamining mass.
+    # initial_params = np.array([105, 14_444, 67_666])
+    # initial_params = np.array([113, 10658, 70_802])
+
+    # initial_params = np.array([141.07, 4934, 79812, 0.951])  # 3618 remaining mass.
+
+    # Broken?
+    # initial_params = np.array([106.71875, 19437.5, 60656.25, 0.89578125])
+
+    # initial_params = np.array([109.09, 18502, 60529, 0.962])  # 3455
+
+    # initial_params = np.array([0.966, 116.88, 14556, 63313])  # 3471
+
+    initial_params = np.array([1.000, 112.17, 4631, 85639])  # 3606
+
+    bounds: list[tuple[float, float]] = [
+        (0.66, 1.0),
+        (50, 150),
+        (1_000, 30_000),
+        (30_000, 90_000),
+    ]
+
+    res = scipy.optimize.minimize(
+        objective,
+        args=(conn,),
+        x0=initial_params,
+        bounds=bounds,
+        method="Nelder-Mead",
+        # method="Powell",
+        options={"maxiter": 200, "disp": True, "xatol": 5e-3, "fatol": 5e-3},
+        tol=5e-3,
+    )
+
+    print(res)
+
+    # for turn_start_alt in range(50, 151, 10):
+    #     for turn_end_alt in range(10_000, 30_001, 5_000):
+    #         with FlightSession(conn) as fs:
+    #             result = GravityTurn(
+    #                 fs, turn_start_alt=turn_start_alt, turn_end_alt=turn_end_alt
+    #             ).do_it()
+    #             print(
+    #                 f"***** start -> end altitude: {turn_start_alt} -> "
+    #                 f"{turn_end_alt}, "
+    #                 f"mass (bigger is better): {result.mass}"
+    #             )
+    #         conn.space_center.revert_to_launch()
+    #         time.sleep(5)
 
 
 if __name__ == "__main__":
