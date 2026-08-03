@@ -124,7 +124,9 @@ class KSPStreams:
         ut_stream = self._streams["ut"]
         with ut_stream.condition:
             while ut_stream() == self._prev_ut:
-                ut_stream.wait()
+                success = ut_stream.condition.wait(10.0)
+                if not success:
+                    raise TimeoutError
 
         # Atomically snapshot every stream under all their condition locks so
         # all values come from the same physics tick.

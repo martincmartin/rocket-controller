@@ -11,7 +11,8 @@ import krpc
 import krpc.client
 import krpc.services.spacecenter
 import numpy as np
-import scipy
+import skopt
+from skopt.space import Real
 from krpc.services.spacecenter import Vessel
 from numpy.typing import NDArray
 
@@ -58,7 +59,6 @@ class FlightSession:
         self._vessel.control.rcs = False
 
         if self._vessel.situation == self.space_center.VesselSituation.pre_launch:
-            self._vessel.auto_pilot.stopping_time = (0.5, 0.5, 0.5)
             self._vessel.auto_pilot.reference_frame = (
                 self._vessel.surface_reference_frame
             )
@@ -102,7 +102,7 @@ class FlightSession:
             self._try(lambda: setattr(vessel.control, "rcs", False))
             self._try(lambda: setattr(vessel.auto_pilot, "target_roll", 90.0))
             self._try(lambda: vessel.auto_pilot.target_pitch_and_heading(90, 90))
-            self._try(lambda: setattr(vessel.auto_pilot, 'engaged', False))
+            self._try(lambda: setattr(vessel.auto_pilot, "engaged", False))
         self._try(lambda: setattr(self.space_center, "physics_warp_factor", 0))
 
         self._try(self.streams.close)
@@ -204,27 +204,28 @@ class GravityTurn:
 
         situations = self.fs.space_center.VesselSituation
         pre_launch_situation = situations.pre_launch
-        sub_orbital_situation = situations.sub_orbital
-        orbiting_situation = situations.orbiting
-        flying_situation = situations.flying
+        splashed_situation = situations.splashed
 
         try:
             while True:
-                streams.next()
-
-                sit = vessel.situation
-
-                if not (
-                    sit == pre_launch_situation
-                    or sit == sub_orbital_situation
-                    or sit == orbiting_situation
-                    or sit == flying_situation
-                ):
-                    print(f"%%%%%%%%%% situation: {sit} !!!")
+                try:
+                    streams.next()
+                except TimeoutError:
+                    print(f"\n%%%%%%%%%%  Timeout reading streams!")
                     return FlightResult(mass=0)
 
-                # could also say e.g. if altitude is < 70k and decreasing, "you're
-                # having a bad day and will not go to space today."
+                if vessel.situation == splashed_situation:
+                    print(f"\n%%%%%%%%%%  Splashed down!")
+                    return FlightResult(mass=0)
+
+                # if altitude is < 70k and decreasing, "you're having a bad day and will
+                # not go to space today."
+                if streams.altitude < 70_000:
+                    unit_vel = streams.velocity / np.linalg.norm(streams.velocity)
+                    unit_radius = streams.position / np.linalg.norm(streams.position)
+                    if np.dot(unit_vel, unit_radius) < -0.3:
+                        print(f"\n%%%%%%%%%%  In atmosphere and heading down!")
+                        return FlightResult(mass=0)
 
                 if vessel.situation == pre_launch_situation:
                     self.prelaunch()
@@ -247,9 +248,11 @@ class GravityTurn:
                     if result:
                         return result
                 else:
-                    print("\nDone.")
+                    print(
+                        f"\nDone, mass: {vessel.mass}, apo/peri: {streams.apopasis}/{streams.periapsis}\n"
+                    )
+                    vessel.auto_pilot.engaged = False
                     vessel.control.sas = True
-                    print(f"mass: {vessel.mass}\n")
                     return FlightResult(vessel.mass)
         finally:
             # Ensure the worker thread/connection are always torn down, even
@@ -307,6 +310,7 @@ class GravityTurn:
             vessel.control.sas = False
             vessel.control.rcs = False
             vessel.control.throttle = self.ascent_throttle
+            print(f"Set throttle to {self.ascent_throttle}")
             vessel.auto_pilot.target_pitch_and_heading(90, self.HEADING)
             self.prev_pitch = 90
             vessel.auto_pilot.target_roll = 90
@@ -511,17 +515,32 @@ class GravityTurn:
                 flush=True,
             )
 
+        return None
 
-def objective(params: Vector, conn) -> float:
+
+def params_to_string(params: Vector, readable: bool = True) -> str:
+    if readable:
+        throttle, turn_start, turn_end, engine_cutoff_altitude = params
+        return (
+            f"{throttle=:.3f}, turn start/end={turn_start:.1f}/{turn_end:.1f}, "
+            f"{engine_cutoff_altitude=:.1f}"
+        )
+    else:
+        return (
+            f"np.array([{params[0]:.3f}, {params[1]:.1f}, "
+            f"{params[2]:.0f}, {params[3]:.0f}])"
+        )
+
+
+def objective(params: Vector, conn: krpc.client.Client) -> float:
+    start = time.perf_counter()
     throttle, turn_start, turn_end, engine_cutoff_altitude = params
-    print(
-        f"**********  {throttle=}, {turn_start=}, {turn_end=}, "
-        f"{engine_cutoff_altitude=}"
-    )
+    print(f"**********  {params_to_string(params)}")
 
     # conn.space_center.revert_to_launch() leaks a lot, eventually slowing down the game
     # a lot.  So we'll load a save instead, "ReadyToLaunch".
-    conn.space_center.revert_to_launch()
+    # conn.space_center.revert_to_launch()
+    conn.space_center.load("ReadyToLaunch")
     time.sleep(7)
 
     with FlightSession(conn) as fs:
@@ -533,9 +552,9 @@ def objective(params: Vector, conn) -> float:
             ascent_throttle=throttle,
         ).do_it()
 
+    elapsed = time.perf_counter() - start
     print(
-        f"**********  np.array([{params[0]:.3f}, {params[1]:.2f}, "
-        f"{params[2]:.0f}, {params[3]:.0f}]), mass: {result.mass}"
+        f"********** {elapsed:.1f} sec, {params_to_string(params, False)}, mass: {result.mass:.1f}"
     )
     return -result.mass
 
@@ -557,25 +576,59 @@ def main() -> None:
 
     # initial_params = np.array([0.966, 116.88, 14556, 63313])  # 3471
 
-    initial_params = np.array([1.000, 112.17, 4631, 85639])  # 3606
+    # initial_params = np.array([1.000, 112.17, 4631, 85639])  # 3606
+    # initial_params = np.array([0.975, 114.97, 4747, 81357])  # 3615
+    initial_params = np.array(
+        [0.9759058604348964, 115.00287996750986, 4797.220120470136, 81413.34938650663]
+    )  # 3616
 
-    bounds: list[tuple[float, float]] = [
-        (0.66, 1.0),
-        (50, 150),
-        (1_000, 30_000),
-        (30_000, 90_000),
+    # Causes catastrophic failure.
+    # initial_params = np.array([0.912, 109.6, 1000.0, 81436])
+
+    initial_params = np.array([0.669, 146.4, 6220, 88713])  # 3680.7
+
+    # initial_params = np.array([0.706, 143.5, 6056, 88359])  # 3678
+
+    best_params = initial_params
+    best_result = 0
+
+    def capture_objective(params: Vector) -> float:
+        nonlocal best_params, best_result
+        result = objective(params, conn)
+        if result < best_result:
+            best_params = params
+            best_result = result
+        print(
+            f"### Best so far: mass={-best_result:.1f}, {params_to_string(best_params)}, "
+            f"{params_to_string(best_params, False)}"
+        )
+        return result
+
+    # bounds: list[tuple[float, float]] = [
+    #     (0.66, 1.0),
+    #     (50.0, 150.0),
+    #     (1_000.0, 30_000.0),
+    #     (30_000.0, 90_000.0),
+    # ]````
+
+    # res = scipy.optimize.minimize(
+    #     capture_objective,
+    #     x0=initial_params,
+    #     bounds=bounds,
+    #     method="Nelder-Mead",
+    #     # method="Powell",
+    #     options={"maxiter": 200, "disp": True, "xatol": 5e-3, "fatol": 5e-3},
+    #     tol=5e-3,
+    # )
+
+    dimensions = [
+        Real(0.66, 1.0),
+        Real(50.0, 150.0),
+        Real(1_000.0, 30_000.0),
+        Real(30_000.0, 90_000.0),
     ]
 
-    res = scipy.optimize.minimize(
-        objective,
-        args=(conn,),
-        x0=initial_params,
-        bounds=bounds,
-        method="Nelder-Mead",
-        # method="Powell",
-        options={"maxiter": 200, "disp": True, "xatol": 5e-3, "fatol": 5e-3},
-        tol=5e-3,
-    )
+    res = skopt.gp_minimize(capture_objective, dimensions, x0=initial_params.tolist())
 
     print(res)
 

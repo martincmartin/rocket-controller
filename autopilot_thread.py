@@ -112,6 +112,7 @@ class AutopilotWorker:
 
         assert conn.space_center is not None
         vessel = conn.space_center.active_vessel
+        assert vessel is not None
         self._vessel = vessel
         frame = vessel.orbit.body.non_rotating_reference_frame
 
