@@ -11,10 +11,10 @@ import krpc
 import krpc.client
 import krpc.services.spacecenter
 import numpy as np
-import skopt
-from skopt.space import Real
+import skopt  # type: ignore[import-untyped]
 from krpc.services.spacecenter import Vessel
 from numpy.typing import NDArray
+from skopt.space import Real  # type: ignore[import-untyped]
 
 from autopilot_thread import AutopilotWorker
 from guidance_link import GuidanceCommand
@@ -213,11 +213,11 @@ class GravityTurn:
                 try:
                     streams.next()
                 except TimeoutError:
-                    print(f"\n%%%%%%%%%%  Timeout reading streams!")
+                    print("\n%%%%%%%%%%  Timeout reading streams!")
                     return FlightResult(mass=0)
 
                 if vessel.situation == splashed_situation:
-                    print(f"\n%%%%%%%%%%  Splashed down!")
+                    print("\n%%%%%%%%%%  Splashed down!")
                     return FlightResult(mass=0)
 
                 # if altitude is < 70k and decreasing, "you're having a bad day and will
@@ -226,7 +226,7 @@ class GravityTurn:
                     unit_vel = streams.velocity / np.linalg.norm(streams.velocity)
                     unit_radius = streams.position / np.linalg.norm(streams.position)
                     if np.dot(unit_vel, unit_radius) < -0.3:
-                        print(f"\n%%%%%%%%%%  In atmosphere and heading down!")
+                        print("\n%%%%%%%%%%  In atmosphere and heading down!")
                         return FlightResult(mass=0)
 
                 if vessel.situation == pre_launch_situation:
@@ -251,7 +251,8 @@ class GravityTurn:
                         return result
                 else:
                     print(
-                        f"\nDone, mass: {vessel.mass}, apo/peri: {streams.apoapsis}/{streams.periapsis}\n"
+                        f"\nDone, mass: {vessel.mass}, "
+                        f"apo/peri: {streams.apoapsis}/{streams.periapsis}\n"
                     )
                     vessel.auto_pilot.engaged = False
                     vessel.control.sas = True
@@ -547,7 +548,9 @@ def objective(
     # conn.space_center.revert_to_launch() leaks a lot, eventually slowing down the game
     # a lot.  So we'll load a save instead, "ReadyToLaunch".
     # conn.space_center.revert_to_launch()
-    conn.space_center.load("ReadyToLaunch")
+    space_center = conn.space_center
+    assert space_center is not None
+    space_center.load("ReadyToLaunch")
     time.sleep(7)
 
     with FlightSession(conn) as fs:
@@ -560,8 +563,10 @@ def objective(
         ).do_it(exit_early)
 
     elapsed = time.perf_counter() - start
+    assert result is not None
     print(
-        f"********** {elapsed:.1f} sec, {params_to_string(params, False)}, mass: {result.mass:.1f}"
+        f"********** {elapsed:.1f} sec, {params_to_string(params, False)}, "
+        f"mass: {result.mass:.1f}"
     )
     return -result.mass
 
@@ -598,7 +603,7 @@ def main() -> None:
     # initial_params = np.array([0.706, 143.5, 6056, 88359])  # 3678
 
     best_params = initial_params
-    best_result = 0
+    best_result = 0.0
 
     def capture_objective(params: Vector) -> float:
         nonlocal best_params, best_result
@@ -607,7 +612,8 @@ def main() -> None:
             best_params = params
             best_result = result
         print(
-            f"### Best so far: mass={-best_result:.1f}, {params_to_string(best_params)}, "
+            f"### Best so far: mass={-best_result:.1f}, "
+            f"{params_to_string(best_params)}, "
             f"{params_to_string(best_params, False)}"
         )
         return result
@@ -645,7 +651,10 @@ def main() -> None:
     else:
         throttle, turn_start, turn_end, engine_cutoff_altitude = initial_params
         with FlightSession(conn) as fs:
-            conn.space_center.load("DebugMe")
+            space_center = conn.space_center
+            assert space_center is not None
+            space_center.load("DebugMe")
+
             result = GravityTurn(
                 fs,
                 turn_start_alt=turn_start,
