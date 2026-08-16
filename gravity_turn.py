@@ -467,11 +467,11 @@ class GravityTurn:
             if not self.print40k and streams.altitude >= 40_000:
                 print(f"alt: {streams.altitude}, mass: {self.plan.burn_result.mass}")
                 self.print40k = True
-                if exit_early:
-                    return FlightResult(self.plan.burn_result.mass)
             elif not self.print60k and streams.altitude >= 60_000:
                 print(f"alt: {streams.altitude}, mass: {self.plan.burn_result.mass}")
                 self.print60k = True
+                if exit_early:
+                    return FlightResult(self.plan.burn_result.mass)
             elif not self.print70k and streams.altitude >= 70_000:
                 print(f"alt: {streams.altitude}, mass: {self.plan.burn_result.mass}")
                 self.print70k = True
@@ -575,32 +575,15 @@ def main() -> None:
     print("Connecting to kRPC server…")
     conn = krpc.connect(name="Gravity Turn")
 
-    # initial_params = np.array([100, 20_000, 60_000, 0.90])  # 3434 reamining mass.
-    # initial_params = np.array([105, 14_444, 67_666])
-    # initial_params = np.array([113, 10658, 70_802])
-
-    # initial_params = np.array([141.07, 4934, 79812, 0.951])  # 3618 remaining mass.
-
-    # Broken?
-    # initial_params = np.array([106.71875, 19437.5, 60656.25, 0.89578125])
-
-    # initial_params = np.array([109.09, 18502, 60529, 0.962])  # 3455
-
-    # initial_params = np.array([0.966, 116.88, 14556, 63313])  # 3471
-
-    # initial_params = np.array([1.000, 112.17, 4631, 85639])  # 3606
-    # initial_params = np.array([0.975, 114.97, 4747, 81357])  # 3615
-    initial_params = np.array(
-        [0.9759058604348964, 115.00287996750986, 4797.220120470136, 81413.34938650663]
-    )  # 3616
-
-    # Causes catastrophic failure.
-    # initial_params = np.array([0.912, 109.6, 1000.0, 81436])
+    initial_params = np.array([0.966, 116.88, 14556, 63313])  # 3471
 
     # Invalid, doesn't make orbit.
     # initial_params = np.array([0.669, 146.4, 6220, 88713])  # 3680.7
 
+    # Invalid, doesn't make orbit.
     # initial_params = np.array([0.706, 143.5, 6056, 88359])  # 3678
+
+    # initial_params = np.array([0.660, 116.5, 12272, 76060])  # 3544
 
     best_params = initial_params
     best_result = 0.0
@@ -651,9 +634,9 @@ def main() -> None:
     else:
         throttle, turn_start, turn_end, engine_cutoff_altitude = initial_params
         with FlightSession(conn) as fs:
-            space_center = conn.space_center
-            assert space_center is not None
-            space_center.load("DebugMe")
+            # space_center = conn.space_center
+            # assert space_center is not None
+            # space_center.load("DebugMe")
 
             result = GravityTurn(
                 fs,
