@@ -184,7 +184,7 @@ class GravityTurn:
         self.print60k = False
         self.print70k = False
 
-    def do_it(self, exit_early: bool = True) -> FlightResult | None:
+    def do_it(self, exit_early: bool = True) -> FlightResult:
         # Reference body parameters (Kerbin)
         vessel = self.fs.vessel
 
@@ -204,6 +204,16 @@ class GravityTurn:
         streams.add_stream("current_stage", getattr, vessel.control, "current_stage")
         streams.start()
 
+        # Minimum achievable mass (all fuel burned, all stages dropped):
+        # the worst-case result returned on failure paths, so optimizers
+        # see a smooth surface instead of a cliff at mass=0.
+        self.segments = build_segments(vessel)
+        last_segment = self.segments[-1]
+        self.dry_mass = (
+            last_segment.initial_mass
+            - (last_segment.thrust / last_segment.ve) * last_segment.max_burn_time
+        )
+
         situations = self.fs.space_center.VesselSituation
         pre_launch_situation = situations.pre_launch
         splashed_situation = situations.splashed
@@ -214,11 +224,11 @@ class GravityTurn:
                     streams.next()
                 except TimeoutError:
                     print("\n%%%%%%%%%%  Timeout reading streams!")
-                    return FlightResult(mass=0)
+                    return FlightResult(self.dry_mass)
 
                 if vessel.situation == splashed_situation:
                     print("\n%%%%%%%%%%  Splashed down!")
-                    return FlightResult(mass=0)
+                    return FlightResult(self.dry_mass)
 
                 # if altitude is < 70k and decreasing, "you're having a bad day and will
                 # not go to space today."
@@ -227,7 +237,7 @@ class GravityTurn:
                     unit_radius = streams.position / np.linalg.norm(streams.position)
                     if np.dot(unit_vel, unit_radius) < -0.3:
                         print("\n%%%%%%%%%%  In atmosphere and heading down!")
-                        return FlightResult(mass=0)
+                        return FlightResult(self.dry_mass)
 
                 if vessel.situation == pre_launch_situation:
                     self.prelaunch()
@@ -246,7 +256,7 @@ class GravityTurn:
                     if self.worker is not None and self.worker.error is not None:
                         print(f"\nAutopilot worker failed: {self.worker.error}")
                         vessel.control.throttle = 0.0
-                        return None
+                        return FlightResult(self.dry_mass)
                     if result:
                         return result
                 else:
@@ -563,7 +573,6 @@ def objective(
         ).do_it(exit_early)
 
     elapsed = time.perf_counter() - start
-    assert result is not None
     print(
         f"********** {elapsed:.1f} sec, {params_to_string(params, False)}, "
         f"mass: {result.mass:.1f}"
