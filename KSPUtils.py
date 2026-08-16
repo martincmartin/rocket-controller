@@ -210,6 +210,29 @@ class EngineGroup:
         self.fuel_duration = fuel_duration  # seconds until limiting propellant depletes
 
 
+def _group_propellant_available(
+    engines: list[Any], name: str, rep_available: float
+) -> float:
+    """Amount of propellant *name* the engine group can burn before dry.
+
+    Engines drawing from a shared external tank all report the same tank
+    contents, so summing over engines would double-count: use the
+    representative engine's reported availability in that case. But when
+    every engine carries the propellant in its own part -- e.g. a cluster
+    of solid boosters, each with internal fuel -- each reports only its own
+    tank, and the group's total flow drains all of them simultaneously, so
+    the group's availability is the sum of the individual amounts.
+    """
+    if all(e.part.resources.has_resource(name) for e in engines):
+        total = 0.0
+        for e in engines:
+            for p in e.propellants:
+                if p.name == name and p.ratio > 0:
+                    total += p.total_resource_available
+        return total
+    return rep_available
+
+
 def _engine_group_stats(engines: list[Any]) -> EngineGroup | None:
     """Compute performance stats for a group of engines sharing fuel.
 
@@ -234,12 +257,17 @@ def _engine_group_stats(engines: list[Any]) -> EngineGroup | None:
         return None
 
     # Fuel duration: find limiting propellant.
-    # Use the first engine as representative — the heuristic assumes
-    # engines in the same group share the same fuel tanks.
+    # Use the first engine as representative for the propellant list; the
+    # available amounts are group-wide (summed over per-engine tanks when
+    # the engines carry their own fuel, e.g. solid boosters).
     PropSnap = namedtuple("PropSnap", ["name", "ratio", "available"])
     rep = engines[0]
     propellants = [
-        PropSnap(p.name, p.ratio, p.total_resource_available)
+        PropSnap(
+            p.name,
+            p.ratio,
+            _group_propellant_available(engines, p.name, p.total_resource_available),
+        )
         for p in rep.propellants
         if p.ratio > 0
     ]
