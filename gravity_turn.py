@@ -210,8 +210,6 @@ class GravityTurn:
         # the worst-case result returned on failure paths, so optimizers
         # see a smooth surface instead of a cliff at mass=0.
         self.segments = build_segments(vessel)
-        for segment in self.segments:
-            print(segment)
         last_segment = self.segments[-1]
         self.dry_mass = (
             last_segment.initial_mass
