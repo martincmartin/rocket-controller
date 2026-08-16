@@ -23,6 +23,8 @@ from sim import Simulator
 
 Vector = NDArray[np.float64]
 
+OPTIMIZE = False
+
 
 def engine_repr(engine: Any) -> str:
     return engine.part.title  # type: ignore[no-any-return]
@@ -182,7 +184,7 @@ class GravityTurn:
         self.print60k = False
         self.print70k = False
 
-    def do_it(self) -> FlightResult | None:
+    def do_it(self, exit_early: bool = True) -> FlightResult | None:
         # Reference body parameters (Kerbin)
         vessel = self.fs.vessel
 
@@ -240,7 +242,7 @@ class GravityTurn:
                 ):
                     self.atmosphere_coast()
                 elif self.eccentricity_decreasing():
-                    result = self.circularize()
+                    result = self.circularize(exit_early)
                     if self.worker is not None and self.worker.error is not None:
                         print(f"\nAutopilot worker failed: {self.worker.error}")
                         vessel.control.throttle = 0.0
@@ -249,7 +251,7 @@ class GravityTurn:
                         return result
                 else:
                     print(
-                        f"\nDone, mass: {vessel.mass}, apo/peri: {streams.apopasis}/{streams.periapsis}\n"
+                        f"\nDone, mass: {vessel.mass}, apo/peri: {streams.apoapsis}/{streams.periapsis}\n"
                     )
                     vessel.auto_pilot.engaged = False
                     vessel.control.sas = True
@@ -382,6 +384,7 @@ class GravityTurn:
         the worker thread keeps commanding attitude every tick from the
         last-published GuidanceCommand regardless (see PLAN.md §5).
         """
+
         sim = Simulator(
             self.mu,
             self.body_radius,
@@ -413,7 +416,7 @@ class GravityTurn:
             )
         )
 
-    def circularize(self) -> FlightResult | None:
+    def circularize(self, exit_early: bool) -> FlightResult | None:
         streams = self.fs.streams
 
         if self.phase != Phase.CIRCULARIZE:
@@ -463,7 +466,8 @@ class GravityTurn:
             if not self.print40k and streams.altitude >= 40_000:
                 print(f"alt: {streams.altitude}, mass: {self.plan.burn_result.mass}")
                 self.print40k = True
-                return FlightResult(self.plan.burn_result.mass)
+                if exit_early:
+                    return FlightResult(self.plan.burn_result.mass)
             elif not self.print60k and streams.altitude >= 60_000:
                 print(f"alt: {streams.altitude}, mass: {self.plan.burn_result.mass}")
                 self.print60k = True
@@ -481,8 +485,9 @@ class GravityTurn:
             angle_error = math.degrees(math.acos(np.dot(streams.direction, thrust_dir)))
 
             print(
-                f"\rcoast time: {coast_time:>5.1f}  ",
-                f"Dir {angle_error:>3.2f}°  ",
+                f"\rcoast time: {coast_time:>5.1f}  "
+                f"Dir {angle_error:>3.2f}° "
+                f"end mass: {self.plan.burn_result.mass}  ",
                 end="",
                 flush=True,
             )
@@ -532,7 +537,9 @@ def params_to_string(params: Vector, readable: bool = True) -> str:
         )
 
 
-def objective(params: Vector, conn: krpc.client.Client) -> float:
+def objective(
+    params: Vector, conn: krpc.client.Client, exit_early: bool = True
+) -> float:
     start = time.perf_counter()
     throttle, turn_start, turn_end, engine_cutoff_altitude = params
     print(f"**********  {params_to_string(params)}")
@@ -550,7 +557,7 @@ def objective(params: Vector, conn: krpc.client.Client) -> float:
             turn_end_alt=turn_end,
             engine_cutoff_altitude=engine_cutoff_altitude,
             ascent_throttle=throttle,
-        ).do_it()
+        ).do_it(exit_early)
 
     elapsed = time.perf_counter() - start
     print(
@@ -585,7 +592,8 @@ def main() -> None:
     # Causes catastrophic failure.
     # initial_params = np.array([0.912, 109.6, 1000.0, 81436])
 
-    initial_params = np.array([0.669, 146.4, 6220, 88713])  # 3680.7
+    # Invalid, doesn't make orbit.
+    # initial_params = np.array([0.669, 146.4, 6220, 88713])  # 3680.7
 
     # initial_params = np.array([0.706, 143.5, 6056, 88359])  # 3678
 
@@ -628,9 +636,25 @@ def main() -> None:
         Real(30_000.0, 90_000.0),
     ]
 
-    res = skopt.gp_minimize(capture_objective, dimensions, x0=initial_params.tolist())
+    if OPTIMIZE:
+        res = skopt.gp_minimize(
+            capture_objective, dimensions, x0=initial_params.tolist()
+        )
 
-    print(res)
+        print(res)
+    else:
+        throttle, turn_start, turn_end, engine_cutoff_altitude = initial_params
+        with FlightSession(conn) as fs:
+            conn.space_center.load("DebugMe")
+            result = GravityTurn(
+                fs,
+                turn_start_alt=turn_start,
+                turn_end_alt=turn_end,
+                engine_cutoff_altitude=engine_cutoff_altitude,
+                ascent_throttle=throttle,
+            ).do_it(False)
+
+            print(result)
 
     # for turn_start_alt in range(50, 151, 10):
     #     for turn_end_alt in range(10_000, 30_001, 5_000):
