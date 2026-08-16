@@ -23,7 +23,7 @@ from sim import Simulator
 
 Vector = NDArray[np.float64]
 
-OPTIMIZE = False
+OPTIMIZE = True
 
 
 def engine_repr(engine: Any) -> str:
@@ -167,6 +167,7 @@ class GravityTurn:
         body = self.fs.vessel.orbit.body
         self.mu = body.gravitational_parameter
         self.body_radius = body.equatorial_radius
+        self.atmosphere_depth = body.atmosphere_depth
         self.frame = body.non_rotating_reference_frame
 
         # Ascent
@@ -202,17 +203,21 @@ class GravityTurn:
         )
         streams.add_stream("direction", getattr, vessel.flight(self.frame), "direction")
         streams.add_stream("current_stage", getattr, vessel.control, "current_stage")
+        streams.add_stream("mass", getattr, vessel, "mass")
         streams.start()
 
         # Minimum achievable mass (all fuel burned, all stages dropped):
         # the worst-case result returned on failure paths, so optimizers
         # see a smooth surface instead of a cliff at mass=0.
         self.segments = build_segments(vessel)
+        for segment in self.segments:
+            print(segment)
         last_segment = self.segments[-1]
         self.dry_mass = (
             last_segment.initial_mass
             - (last_segment.thrust / last_segment.ve) * last_segment.max_burn_time
         )
+        print(f"dry mass: {self.dry_mass}")
 
         situations = self.fs.space_center.VesselSituation
         pre_launch_situation = situations.pre_launch
@@ -266,7 +271,11 @@ class GravityTurn:
                     )
                     vessel.auto_pilot.engaged = False
                     vessel.control.sas = True
-                    return FlightResult(vessel.mass)
+                    return FlightResult(
+                        self.orbit_shortfall_mass(
+                            vessel.mass, streams.apoapsis, streams.periapsis
+                        )
+                    )
         finally:
             # Ensure the worker thread/connection are always torn down, even
             # on an early return or an exception unwinding out of do_it().
@@ -526,12 +535,58 @@ class GravityTurn:
             print(
                 f"\rDir {angle_error:>3.2f}°  "
                 f"Ap {streams.apoapsis:>5.0f}/{target_apoapsis:>5.0f}  "
-                f"Pe {streams.periapsis:>5.0f}/{target_periapsis:>5.0f}",
+                f"Pe {streams.periapsis:>5.0f}/{target_periapsis:>5.0f} "
+                f"mass {streams.mass:>5.0f}",
                 end="",
                 flush=True,
             )
 
         return None
+
+    def orbit_shortfall_mass(
+        self, mass: float, apoapsis_alt: float, periapsis_alt: float
+    ) -> float:
+        """Penalize the final mass when the orbit falls short of the
+        target altitude.  If either apsis is inside the atmosphere the
+        flight counts as a failure, and the dry mass is returned outright.
+        Otherwise, for each of apoapsis/periapsis below target, compute
+        the delta-v to raise it to the target with a simple impulsive
+        burn at the opposite apsis (vis viva), convert that to fuel mass
+        with the rocket equation (last-stage Isp, ignoring staging), and
+        charge twice that much mass.  Never returns less than the dry
+        mass, so a successful flight always scores at least as well as a
+        failed one."""
+        if (
+            apoapsis_alt < self.atmosphere_depth
+            or periapsis_alt < self.atmosphere_depth
+        ):
+            return self.dry_mass
+
+        target_radius = self.body_radius + self.TARGET_ALTITUDE
+        r_a = self.body_radius + apoapsis_alt
+        r_p = self.body_radius + periapsis_alt
+
+        delta_v = 0.0
+        if apoapsis_alt < self.TARGET_ALTITUDE:
+            a_now = 0.5 * (r_a + r_p)
+            a_new = 0.5 * (r_p + target_radius)
+            delta_v += self.vis_viva(r_p, a_new) - self.vis_viva(r_p, a_now)
+            r_a = target_radius
+        if periapsis_alt < self.TARGET_ALTITUDE:
+            a_now = 0.5 * (r_a + r_p)
+            a_new = 0.5 * (r_a + target_radius)
+            delta_v += self.vis_viva(r_a, a_new) - self.vis_viva(r_a, a_now)
+            r_p = target_radius
+
+        if delta_v <= 0:
+            return mass
+
+        fuel_used = mass * (1.0 - math.exp(-delta_v / self.segments[0].ve))
+        return max(mass - 2.0 * fuel_used, self.dry_mass)
+
+    def vis_viva(self, r: float, a: float) -> float:
+        """Orbital speed at radius r in an orbit of semi-major axis a."""
+        return math.sqrt(self.mu * (2.0 / r - 1.0 / a))
 
 
 def params_to_string(params: Vector, readable: bool = True) -> str:
@@ -584,7 +639,7 @@ def main() -> None:
     print("Connecting to kRPC server…")
     conn = krpc.connect(name="Gravity Turn")
 
-    initial_params = np.array([0.966, 116.88, 14556, 63313])  # 3471
+    initial_params = np.array([0.966, 116.88, 14556, 63313])  # 3491
 
     # Invalid, doesn't make orbit.
     # initial_params = np.array([0.669, 146.4, 6220, 88713])  # 3680.7
