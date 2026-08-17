@@ -285,6 +285,8 @@ class CircularizationPlan:
     burn_time: float
     ref_angle: float
     coast_time: float  # predicted seconds from now until burn should start
+    staging_apoapsis_altitudes: list[float]
+    staging_periapsis_altitudes: list[float]
     final_apoapsis_altitude: float  # predicted altitude (m) after the burn
     final_periapsis_altitude: float  # predicted altitude (m) after the burn
     burn_result: BurnResult  # full propagated trajectory at the optimum
@@ -900,6 +902,19 @@ class Simulator:
             ap_alt = final_orbit.apoapsis_radius - self.body_radius
             pe_alt = final_orbit.periapsis_radius - self.body_radius
 
+            # Orbital elements at the end of each stage's burn: the last
+            # row of each thrust phase in the propagated trajectory.
+            staging_aps: list[float] = []
+            staging_pes: list[float] = []
+            for phase in result.phases:
+                if phase.shape[1] == 6:
+                    x, y, vx, vy = phase[-1][1:5]
+                    els = orbital_elements(
+                        np.array([x, y]), np.array([vx, vy]), self.mu
+                    )
+                    staging_aps.append(float(els.apoapsis_radius - self.body_radius))
+                    staging_pes.append(float(els.periapsis_radius - self.body_radius))
+
         # Print summary (outside context so timing is finalized)
         if verbose:
             print("\n***** SLSQP linear-tangent solution")
@@ -924,6 +939,8 @@ class Simulator:
             burn_time=float(burn_time),
             ref_angle=float(ref_angle),
             coast_time=float(coast_time),
+            staging_apoapsis_altitudes=staging_aps,
+            staging_periapsis_altitudes=staging_pes,
             final_apoapsis_altitude=ap_alt,
             final_periapsis_altitude=pe_alt,
             burn_result=result,

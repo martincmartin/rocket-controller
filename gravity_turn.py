@@ -502,9 +502,19 @@ class GravityTurn:
 
             angle_error = math.degrees(math.acos(np.dot(streams.direction, thrust_dir)))
 
+            staging_str = ", ".join(
+                f"{ap:.0f}/{pe:.0f}"
+                for ap, pe in zip(
+                    self.plan.staging_apoapsis_altitudes,
+                    self.plan.staging_periapsis_altitudes,
+                    strict=True,
+                )
+            )
+
             print(
                 f"\rcoast time: {coast_time:>5.1f}  "
                 f"Dir {angle_error:>3.2f}° "
+                f"staging ap/pe: {staging_str}  "
                 f"end mass: {self.plan.burn_result.mass}  ",
                 end="",
                 flush=True,
