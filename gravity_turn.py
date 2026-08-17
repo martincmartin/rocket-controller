@@ -23,7 +23,7 @@ from sim import Simulator
 
 Vector = NDArray[np.float64]
 
-OPTIMIZE = True
+OPTIMIZE = False
 
 
 def engine_repr(engine: Any) -> str:
@@ -637,15 +637,14 @@ def main() -> None:
     print("Connecting to kRPC server…")
     conn = krpc.connect(name="Gravity Turn")
 
-    initial_params = np.array([0.966, 116.88, 14556, 63313])  # 3491
-
-    # Invalid, doesn't make orbit.
-    # initial_params = np.array([0.669, 146.4, 6220, 88713])  # 3680.7
-
-    # Invalid, doesn't make orbit.
-    # initial_params = np.array([0.706, 143.5, 6056, 88359])  # 3678
+    # initial_params = np.array([0.966, 116.88, 14556, 63313])  # 3491
 
     # initial_params = np.array([0.660, 116.5, 12272, 76060])  # 3544
+
+    # initial_params = np.array([0.817, 106.5, 7673, 71838])  # 3589
+
+    # 3439, overshoots target apoapsis.
+    initial_params = np.array([0.711, 116.6, 25132, 47907])
 
     best_params = initial_params
     best_result = 0.0
