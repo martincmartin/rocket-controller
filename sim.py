@@ -24,7 +24,6 @@ This module computes flight plans. Executing those plans in KSP is the
 responsibility of the flight-control layer.
 """
 
-import csv
 import functools
 import math
 import resource
@@ -161,14 +160,6 @@ class TimingContext:
 # Making this np.inf leads to np.inf - np.inf inside scipi, which is Nan.
 MAX_ERROR = 1e18
 
-# Set to True to enable per-timestep CSV debug logging of the
-# circularization burn: both the optimizer's predicted trajectory
-# (write_circularization_debug_csv below, called from gravity_turn.py)
-# and the live telemetry recorded during the actual burn in
-# gravity_turn.py. Off by default -- this is a debugging aid, not
-# something the flight controller depends on.
-TIMESERIES_LOGGING = False
-
 
 @dataclass
 class RocketSegment:
@@ -290,110 +281,6 @@ class CircularizationPlan:
     final_apoapsis_altitude: float  # predicted altitude (m) after the burn
     final_periapsis_altitude: float  # predicted altitude (m) after the burn
     burn_result: BurnResult  # full propagated trajectory at the optimum
-
-
-def write_circularization_debug_csv(
-    path: str,
-    plan: CircularizationPlan,
-    segments: list[RocketSegment],
-    ut0: float,
-) -> None:
-    """Write every timestep of `plan.burn_result` (the propagated
-    trajectory at the optimum found by `find_linear_tangent_params`) to a
-    CSV file at `path`, for comparison against the live telemetry
-    recorded during the actual burn.
-
-    Times are converted from the burn-local, continuous time reference
-    used by `propagate_linear_tangent` (0 at the start of the burn) to
-    universal time via `ut0 + plan.coast_time + t_local`. Positions,
-    velocities, and the thrust direction are expanded from the plan's 2D
-    orbital-plane coordinates back to 3D via `plan.plane.from_plane(...)`.
-
-    The thrust direction is recomputed here (duplicating the math in
-    `linear_tangent_dynamics`) rather than read from the propagated
-    state, since the ODE solution only records position/velocity/mass,
-    not the steering angle.
-
-    No-op if `TIMESERIES_LOGGING` is False.
-    """
-    if not TIMESERIES_LOGGING:
-        return
-
-    with open(path, "w", newline="") as f:
-        writer = csv.writer(f)
-        writer.writerow(
-            [
-                "ut",
-                "t_local",
-                "phase",
-                "segment_name",
-                "x",
-                "y",
-                "z",
-                "vx",
-                "vy",
-                "vz",
-                "mass",
-                "thrust_dir_r",
-                "thrust_dir_w",
-                "thrust_dir_x",
-                "thrust_dir_y",
-                "thrust_dir_z",
-            ]
-        )
-
-        thrust_phase_index = 0
-        last_mass = math.nan
-
-        for entry in plan.burn_result.phases:
-            is_thrust = entry.shape[1] == 6
-
-            for row in entry:
-                if is_thrust:
-                    t_local, x, y, vx, vy, mass = row
-                    last_mass = mass
-                    segment = segments[thrust_phase_index]
-                    phase = "thrust"
-                    segment_name = segment.name
-                    theta = plan.ref_angle + math.atan(
-                        plan.a_coeff + plan.b_coeff * t_local
-                    )
-                    thrust_dir_2d = np.array([math.cos(theta), math.sin(theta)])
-                else:
-                    t_local, x, y, vx, vy = row
-                    mass = last_mass
-                    phase = "coast"
-                    segment_name = ""
-                    thrust_dir_2d = np.array([0.0, 0.0])
-
-                ut = ut0 + plan.coast_time + t_local
-                r3d = plan.plane.from_plane(np.array([x, y]))
-                v3d = plan.plane.from_plane(np.array([vx, vy]))
-                thrust_dir_3d = plan.plane.from_plane(thrust_dir_2d)
-
-                writer.writerow(
-                    [
-                        ut,
-                        t_local,
-                        phase,
-                        segment_name,
-                        r3d[0],
-                        r3d[1],
-                        r3d[2],
-                        v3d[0],
-                        v3d[1],
-                        v3d[2],
-                        mass,
-                        thrust_dir_2d[0],
-                        thrust_dir_2d[1],
-                        thrust_dir_3d[0],
-                        thrust_dir_3d[1],
-                        thrust_dir_3d[2],
-                    ]
-                )
-
-            if not is_thrust:
-                thrust_phase_index += 1
 
 
 def cross2d(r: Vector, v: Vector) -> float:
