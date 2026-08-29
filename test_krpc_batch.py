@@ -5,6 +5,7 @@ make_batched_control_sender() touch -- no live KSP/kRPC server needed.
 """
 
 import threading
+from collections.abc import Iterable
 from typing import Any
 
 import krpc.schema.KRPC_pb2 as KRPC_pb2
@@ -52,10 +53,10 @@ class FakeConnection:
         self,
         service: str,
         procedure: str,
-        args: list[Any],
-        arg_names: list[str],
-        arg_types: list[Any],
-        return_type: Any,
+        args: Iterable[object],
+        param_names: Iterable[str],
+        param_types: Iterable[Any],
+        return_type: Any | None,
     ) -> KRPC_pb2.ProcedureCall:
         self._build_call_log.append((service, procedure, args))
         call = KRPC_pb2.ProcedureCall()

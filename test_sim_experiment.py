@@ -2,6 +2,7 @@
 
 import numpy as np
 import pytest
+from scipy.integrate._ivp.ivp import OdeResult
 
 from sim_experiment import (
     LinearTangentProfile,
@@ -9,6 +10,7 @@ from sim_experiment import (
     PerStageLinearTangentProfile,
     RocketSegment,
     Simulator,
+    Vector,
 )
 
 MU = 3.5316e12
@@ -67,9 +69,27 @@ def test_per_stage_profile_uses_each_stage_coefficients(
     coefficients: list[tuple[float, float]] = []
     original = sim.solve_linear_tangent
 
-    def spy(*args: object, **kwargs: object):
-        coefficients.append((float(args[5]), float(args[6])))
-        return original(*args, **kwargs)
+    def spy(
+        t_offset: float,
+        t_duration: float,
+        position: Vector,
+        velocity: Vector,
+        segment: RocketSegment,
+        a_coeff: float,
+        b_coeff: float,
+        ref_angle: float,
+    ) -> OdeResult:
+        coefficients.append((a_coeff, b_coeff))
+        return original(
+            t_offset,
+            t_duration,
+            position,
+            velocity,
+            segment,
+            a_coeff,
+            b_coeff,
+            ref_angle,
+        )
 
     monkeypatch.setattr(sim, "solve_linear_tangent", spy)
     burn_time = sim.segments[0].max_burn_time + sim.staging_duration + 5.0

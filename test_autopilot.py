@@ -4,7 +4,7 @@ All tests use a fake KSPStreams object — no live KSP/kRPC server needed.
 """
 
 import math
-from typing import Any
+from typing import Any, cast
 
 import numpy as np
 import pytest
@@ -18,6 +18,7 @@ from autopilot import (
     _solve_rotational_torque,
     _torque_to_command,
 )
+from KSPUtils import KSPStreams
 
 # ─── Fakes ───────────────────────────────────────────────────────────────────
 
@@ -192,13 +193,17 @@ def _make_autopilot(
     vessel = FakeVessel()
     frame = object()
     ticks_per_filter_cycle = 1.0 / (cutoff_freq_hz * UNWARPED_PHYSICS_TIMESTEP)
-    kwargs: dict[str, float] = {}
+    kwargs: dict[str, Any] = {}
     if sat_angle_deg is not None:
         kwargs["sat_angle_deg"] = sat_angle_deg
     if omega_n_max_normalized is not None:
         kwargs["omega_n_max_normalized"] = omega_n_max_normalized
     ap = CustomAutopilot(
-        ks, vessel, frame, ticks_per_filter_cycle=ticks_per_filter_cycle, **kwargs
+        cast(KSPStreams, ks),
+        vessel,
+        frame,
+        ticks_per_filter_cycle=ticks_per_filter_cycle,
+        **kwargs,
     )
     return ap, ks, vessel
 
@@ -218,7 +223,8 @@ class TestOmegaNSat:
             sat_angle_rad=math.pi / 4,
             omega_n_max=5.0,
         )
-        assert result == (pytest.approx(expected, rel=1e-9), False)
+        assert result[0] == pytest.approx(expected, rel=1e-9)
+        assert result[1] is False
 
     def test_capped_at_max(self) -> None:
         result = _omega_n_sat(
@@ -228,7 +234,8 @@ class TestOmegaNSat:
             sat_angle_rad=math.radians(45.0),
             omega_n_max=5.0,
         )
-        assert result == (pytest.approx(5.0), True)
+        assert result[0] == pytest.approx(5.0)
+        assert result[1] is True
 
     def test_zero_torque_falls_back_to_max(self) -> None:
         result = _omega_n_sat(
@@ -238,7 +245,8 @@ class TestOmegaNSat:
             sat_angle_rad=math.radians(45.0),
             omega_n_max=5.0,
         )
-        assert result == (pytest.approx(5.0), True)
+        assert result[0] == pytest.approx(5.0)
+        assert result[1] is True
 
 
 class TestRateGainSat:

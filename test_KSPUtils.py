@@ -5,6 +5,9 @@ no value yet" (start() was called, but next() hasn't run since) is
 distinguished from "no such stream" (never registered at all).
 """
 
+from typing import Any, cast
+
+import krpc.client
 import pytest
 
 from KSPUtils import G0, KSPStreams, _engine_group_stats, build_segments
@@ -46,7 +49,7 @@ class FakeConn:
         self.space_center = FakeSpaceCenter()
         self._next_value = 1.0
 
-    def add_stream(self, func, *args, **kwargs) -> FakeStream:
+    def add_stream(self, func: Any, *args: Any, **kwargs: Any) -> FakeStream:
         value = self._next_value
         self._next_value += 1.0
         return FakeStream(value)
@@ -57,14 +60,14 @@ def conn() -> FakeConn:
     return FakeConn()
 
 
-def test_never_registered_raises_no_stream_named(conn):
-    ks = KSPStreams(conn)
+def test_never_registered_raises_no_stream_named(conn: FakeConn) -> None:
+    ks = KSPStreams(cast(krpc.client.Client, conn))
     with pytest.raises(AttributeError, match="has no stream named 'bogus'"):
         _ = ks.bogus
 
 
-def test_registered_but_next_not_called_raises_no_value_yet(conn):
-    ks = KSPStreams(conn)
+def test_registered_but_next_not_called_raises_no_value_yet(conn: FakeConn) -> None:
+    ks = KSPStreams(cast(krpc.client.Client, conn))
     ks.add_stream("altitude", lambda: 1)
     ks.start()
 
@@ -72,8 +75,8 @@ def test_registered_but_next_not_called_raises_no_value_yet(conn):
         _ = ks.altitude
 
 
-def test_registered_and_next_called_returns_value(conn):
-    ks = KSPStreams(conn)
+def test_registered_and_next_called_returns_value(conn: FakeConn) -> None:
+    ks = KSPStreams(cast(krpc.client.Client, conn))
     ks.add_stream("altitude", lambda: 1)
     ks.start()
     ks.next()
@@ -81,8 +84,10 @@ def test_registered_and_next_called_returns_value(conn):
     assert ks.altitude is not None
 
 
-def test_error_message_lists_registered_streams_for_unknown_name(conn):
-    ks = KSPStreams(conn)
+def test_error_message_lists_registered_streams_for_unknown_name(
+    conn: FakeConn,
+) -> None:
+    ks = KSPStreams(cast(krpc.client.Client, conn))
     ks.add_stream("altitude", lambda: 1)
 
     with pytest.raises(AttributeError) as exc_info:
@@ -186,7 +191,7 @@ def _lf_engine(part: FakePart, available_lf: float) -> FakeEngine:
     )
 
 
-def test_single_engine_group_duration_from_own_tank():
+def test_single_engine_group_duration_from_own_tank() -> None:
     # One liquid engine on its own tank: 540 LF + 660 Ox, flow 68.51 kg/s.
     group = _engine_group_stats([_lf_engine(_swivel_part(), 540.0)])
     expected = 540.0 / (215000.0 / (320.0 * G0) / (0.9 * 5.0 + 1.1 * 5.0) * 0.9)
@@ -194,7 +199,7 @@ def test_single_engine_group_duration_from_own_tank():
     assert group.fuel_duration == pytest.approx(expected, rel=1e-9)
 
 
-def test_shared_tank_group_not_double_counted():
+def test_shared_tank_group_not_double_counted() -> None:
     # Two engines drawing from the same external tank: the group flow is
     # twice the single-engine flow, so the shared tank drains twice as fast.
     # The representative engine reports the whole shared tank, which must
@@ -208,7 +213,7 @@ def test_shared_tank_group_not_double_counted():
     assert group.fuel_duration == pytest.approx(single.fuel_duration / 2, rel=1e-9)
 
 
-def test_srb_cluster_sums_own_tanks():
+def test_srb_cluster_sums_own_tanks() -> None:
     # Two solid boosters, each with its own internal 820-unit tank. Each
     # engine reports only its own tank, so the group must burn 2x820 units
     # with the combined flow -- i.e. the same per-engine burn time. Before
@@ -228,7 +233,7 @@ def test_srb_cluster_sums_own_tanks():
     assert group.fuel_duration == pytest.approx(expected, rel=1e-9)
 
 
-def test_build_segments_srb_cluster_mass_accounting():
+def test_build_segments_srb_cluster_mass_accounting() -> None:
     # Regression test for the reported bug: a 2-stage rocket with a pair of
     # solid boosters under a liquid sustainer, on the pad. The last
     # segment (Terrier stage) has true initial mass 4450 kg, but before the

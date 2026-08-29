@@ -10,8 +10,9 @@ import threading
 import time
 from collections.abc import Callable
 from types import SimpleNamespace
-from typing import Any
+from typing import Any, cast
 
+import krpc.client
 import numpy as np
 import pytest
 
@@ -89,8 +90,20 @@ class FakeConnection:
             return self.ut_stream
         if func is getattr:
             obj, name = args[0], args[1]
-            return _FakeStream(lambda o=obj, n=name: getattr(o, n))
-        return _FakeStream(lambda f=func, a=args, kw=kwargs: f(*a, **kw))
+
+            def read_attr(target: Any = obj, attribute: Any = name) -> Any:
+                return getattr(target, attribute)
+
+            return _FakeStream(read_attr)
+
+        def call(
+            callable_obj: Any = func,
+            call_args: tuple[Any, ...] = args,
+            call_kwargs: dict[str, Any] = kwargs,
+        ) -> Any:
+            return callable_obj(*call_args, **call_kwargs)
+
+        return _FakeStream(call)
 
     def tick(self, dt: float = 0.02) -> None:
         with self.ut_stream.condition:
@@ -123,7 +136,7 @@ def _make_worker() -> tuple[AutopilotWorker, FakeConnection]:
         return conn
 
     worker = AutopilotWorker(
-        connect=fake_connect,
+        connect=cast(Callable[..., krpc.client.Client], fake_connect),
         control_sender_factory=_fake_control_sender_factory,
     )
     return worker, conn

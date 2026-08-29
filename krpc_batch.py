@@ -13,16 +13,54 @@ pyproject.toml -- re-verify this module against krpc's CHANGELOG/source
 before upgrading that pin).
 """
 
-from collections.abc import Callable
-from typing import Any
+from collections.abc import Callable, Iterable
+from contextlib import AbstractContextManager
+from typing import Any, Protocol
 
-import krpc.client
 import krpc.schema.KRPC_pb2 as KRPC_pb2
 
 ControlSender = Callable[[float, float, float], None]
 
 
-def send_batch(conn: krpc.client.Client, calls: list[Any]) -> list[Any]:
+class _RpcConnection(Protocol):
+    def send_message(self, message: KRPC_pb2.Request, /) -> None: ...
+
+    def receive_message(self, message_type: type, /) -> KRPC_pb2.Response: ...
+
+
+class _TypeRegistry(Protocol):
+    def class_type(self, service: str, name: str) -> Any: ...
+
+    @property
+    def float_type(self) -> Any: ...
+
+
+class BatchConnection(Protocol):
+    @property
+    def _rpc_connection_lock(self) -> AbstractContextManager[Any]: ...
+
+    @property
+    def _rpc_connection(self) -> _RpcConnection: ...
+
+    def _build_error(self, error: Any) -> Exception: ...
+
+
+class ControlConnection(BatchConnection, Protocol):
+    @property
+    def _types(self) -> _TypeRegistry: ...
+
+    def _build_call(
+        self,
+        service: str,
+        procedure: str,
+        args: Iterable[object],
+        param_names: Iterable[str],
+        param_types: Iterable[Any],
+        return_type: Any | None,
+    ) -> Any: ...
+
+
+def send_batch(conn: BatchConnection, calls: list[Any]) -> list[Any]:
     """Send several ProcedureCalls in one request; return their results in
     order. Raises (via conn._build_error, the same exception types a normal
     single-call _invoke() would raise) on a request-level error.
@@ -45,9 +83,7 @@ def send_batch(conn: krpc.client.Client, calls: list[Any]) -> list[Any]:
     return list(response.results)
 
 
-def make_batched_control_sender(
-    conn: krpc.client.Client, control: Any
-) -> ControlSender:
+def make_batched_control_sender(conn: ControlConnection, control: Any) -> ControlSender:
     """Returns a function(pitch, roll, yaw) that applies all three via one
     round trip instead of three (Control_set_Pitch/Roll/Yaw)."""
     control_type = conn._types.class_type("SpaceCenter", "Control")

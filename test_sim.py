@@ -5,12 +5,15 @@ from dataclasses import dataclass
 
 import numpy as np
 import pytest
+from scipy.integrate._ivp.ivp import OdeResult
 
 from sim import (
+    BurnResult,
     CircularizationPlan,
     OrbitalPlane,
     RocketSegment,
     Simulator,
+    Vector,
     orbital_elements,
     to_rv,
     to_rvm,
@@ -54,7 +57,7 @@ def vector(*coords: float) -> np.ndarray:
 
 
 @pytest.fixture
-def sim():
+def sim() -> Simulator:
     return Simulator(
         MU,
         body_radius=KERBIN_RADIUS,
@@ -96,13 +99,13 @@ COAST_FINISH = DynamicsTestState(
 )
 
 
-def test_coast_dynamics(sim):
+def test_coast_dynamics(sim: Simulator) -> None:
     """Verify coasting propagation matches recorded KSP trajectory."""
     plane = OrbitalPlane(COAST_START.r3d, COAST_START.v3d)
     r = plane.to_plane(COAST_START.r3d)
     v = plane.to_plane(COAST_START.v3d)
 
-    def full(vec):
+    def full(vec: Vector) -> Vector:
         return plane.from_plane(vec)
 
     np.testing.assert_allclose(full(r), COAST_START.r3d)
@@ -110,7 +113,7 @@ def test_coast_dynamics(sim):
     with np.errstate(invalid="raise"):
         solution = sim.solve_coast((COAST_START.elapsed, COAST_FINISH.elapsed), r, v)
         assert math.isclose(solution.t[-1], COAST_FINISH.elapsed)
-        end_r, end_v = to_rv(solution.y[:, -1])
+        end_r, end_v = to_rv(np.asarray(solution.y[:, -1], dtype=float))
         np.testing.assert_allclose(full(end_r), COAST_FINISH.r3d, atol=0.5)
         np.testing.assert_allclose(full(end_v), COAST_FINISH.v3d, atol=0.2)
 
@@ -118,7 +121,7 @@ def test_coast_dynamics(sim):
 # --- orbital_elements tests ---
 
 
-def test_circular_orbit():
+def test_circular_orbit() -> None:
     """Circular orbit: e=0, a=R, rp=ra=R, zero eccentricity vector."""
     R = 680_000.0
     v_c = math.sqrt(MU / R)
@@ -132,7 +135,7 @@ def test_circular_orbit():
     np.testing.assert_allclose(elems.eccentricity_vector, [0.0, 0.0], atol=1e-10)
 
 
-def test_elliptical_orbit_at_periapsis():
+def test_elliptical_orbit_at_periapsis() -> None:
     """Elliptical orbit viewed from periapsis: e_vec points toward periapsis (+x)."""
     a = 750_000.0
     e = 0.1
@@ -151,7 +154,7 @@ def test_elliptical_orbit_at_periapsis():
     assert e_vec[1] == pytest.approx(0.0, abs=1e-10)
 
 
-def test_elliptical_orbit_at_apoapsis():
+def test_elliptical_orbit_at_apoapsis() -> None:
     """Elliptical orbit viewed from apoapsis: e_vec points toward periapsis (-x)."""
     a = 750_000.0
     e = 0.1
@@ -171,7 +174,7 @@ def test_elliptical_orbit_at_apoapsis():
     assert e_vec[1] == pytest.approx(0.0, abs=1e-10)
 
 
-def test_hyperbolic_orbit():
+def test_hyperbolic_orbit() -> None:
     """Hyperbolic orbit: e>1, a<0, ra=inf, positive energy."""
     R = 680_000.0
     v_esc = math.sqrt(2 * MU / R)
@@ -186,7 +189,7 @@ def test_hyperbolic_orbit():
     assert elems.specific_energy > 0
 
 
-def test_rotated_elliptical_orbit():
+def test_rotated_elliptical_orbit() -> None:
     """Same ellipse rotated 90°: periapsis along +y, e_vec points +y."""
     a = 750_000.0
     e = 0.1
@@ -208,7 +211,7 @@ def test_rotated_elliptical_orbit():
 # --- prograde_at_apoapsis tests ---
 
 
-def test_prograde_at_apoapsis_ccw_periapsis_along_x():
+def test_prograde_at_apoapsis_ccw_periapsis_along_x() -> None:
     """CCW orbit (h>0), periapsis along +x.
     Apoapsis is along -x. For CCW motion (+x→+y→-x→-y), at -x the velocity
     points in -y direction → prograde angle = -π/2.
@@ -226,7 +229,7 @@ def test_prograde_at_apoapsis_ccw_periapsis_along_x():
     assert angle == pytest.approx(-math.pi / 2, abs=1e-10)
 
 
-def test_prograde_at_apoapsis_cw_periapsis_along_x():
+def test_prograde_at_apoapsis_cw_periapsis_along_x() -> None:
     """CW orbit (h<0), periapsis along +x.
     Apoapsis along -x. For CW motion (+x→-y→-x→+y), at -x the velocity
     points in +y direction → prograde angle = π/2.
@@ -244,7 +247,7 @@ def test_prograde_at_apoapsis_cw_periapsis_along_x():
     assert angle == pytest.approx(math.pi / 2, abs=1e-10)
 
 
-def test_prograde_at_apoapsis_ccw_periapsis_along_y():
+def test_prograde_at_apoapsis_ccw_periapsis_along_y() -> None:
     """CCW orbit, periapsis along +y.
     Apoapsis is along -y. For CCW motion (+y→-x→-y→+x), at -y the velocity
     points in +x direction → angle = 0.
@@ -263,7 +266,7 @@ def test_prograde_at_apoapsis_ccw_periapsis_along_y():
     assert math.sin(angle) == pytest.approx(0.0, abs=1e-10)
 
 
-def test_prograde_at_apoapsis_matches_actual_velocity(sim):
+def test_prograde_at_apoapsis_matches_actual_velocity(sim: Simulator) -> None:
     """The angle returned should match the actual velocity direction at apoapsis,
     verified by propagating to apoapsis and checking the velocity direction.
     """
@@ -282,7 +285,7 @@ def test_prograde_at_apoapsis_matches_actual_velocity(sim):
 
     # Propagate to apoapsis
     solution = sim.solve_coast((0.0, half_period), r0, v0)
-    r_apo, v_apo = to_rv(solution.y[:, -1])
+    r_apo, v_apo = to_rv(np.asarray(solution.y[:, -1], dtype=float))
 
     # At apoapsis the radius should be ~ra (within 100m — integrator stops at T/2,
     # not the exact apoapsis moment)
@@ -303,7 +306,7 @@ def test_prograde_at_apoapsis_matches_actual_velocity(sim):
 # --- target_velocity tests ---
 
 
-def test_target_velocity_magnitude_and_perpendicularity(sim):
+def test_target_velocity_magnitude_and_perpendicularity(sim: Simulator) -> None:
     """Magnitude should be sqrt(mu/r), and result should be perpendicular to r,
     regardless of the (nonzero) input velocity used to pick a direction."""
     R = 680_000.0
@@ -317,7 +320,7 @@ def test_target_velocity_magnitude_and_perpendicularity(sim):
     assert np.dot(result, r) == pytest.approx(0.0, abs=1e-6)
 
 
-def test_target_velocity_ccw_direction():
+def test_target_velocity_ccw_direction() -> None:
     """At r=(R,0) with a CCW-pointing v (+y), target velocity should point +y."""
     sim = Simulator(
         MU,
@@ -336,7 +339,7 @@ def test_target_velocity_ccw_direction():
     np.testing.assert_allclose(result, [0.0, expected_speed], atol=1e-6)
 
 
-def test_target_velocity_cw_direction():
+def test_target_velocity_cw_direction() -> None:
     """At r=(R,0) with a CW-pointing v (-y), target velocity should point -y."""
     sim = Simulator(
         MU,
@@ -355,7 +358,7 @@ def test_target_velocity_cw_direction():
     np.testing.assert_allclose(result, [0.0, -expected_speed], atol=1e-6)
 
 
-def test_target_velocity_rotated_position():
+def test_target_velocity_rotated_position() -> None:
     """At r=(0,R) with CCW-pointing v (-x direction, per the CCW convention
     used elsewhere in this file: periapsis along +y, CCW velocity is -x),
     target velocity should point in -x."""
@@ -376,7 +379,7 @@ def test_target_velocity_rotated_position():
     np.testing.assert_allclose(result, [-expected_speed, 0.0], atol=1e-6)
 
 
-def test_target_velocity_independent_of_input_speed_magnitude():
+def test_target_velocity_independent_of_input_speed_magnitude() -> None:
     """Only the sign/direction of v should matter, not its magnitude."""
     sim = Simulator(
         MU,
@@ -393,7 +396,7 @@ def test_target_velocity_independent_of_input_speed_magnitude():
     np.testing.assert_allclose(slow, fast, atol=1e-9)
 
 
-def test_target_velocity_with_radial_component_ccw():
+def test_target_velocity_with_radial_component_ccw() -> None:
     """v has both a radial (+x, outward) and a CCW tangential (+y) component.
     The radial component should be ignored; result should match the pure
     CCW-tangential case."""
@@ -415,7 +418,7 @@ def test_target_velocity_with_radial_component_ccw():
     assert np.dot(result, r) == pytest.approx(0.0, abs=1e-6)
 
 
-def test_target_velocity_with_radial_component_cw():
+def test_target_velocity_with_radial_component_cw() -> None:
     """v has both a radial (-x, inward) and a CW tangential (-y) component.
     The radial component (and its sign) should not affect the result."""
     sim = Simulator(
@@ -436,7 +439,7 @@ def test_target_velocity_with_radial_component_cw():
     assert np.dot(result, r) == pytest.approx(0.0, abs=1e-6)
 
 
-def test_target_velocity_purely_radial_input_defaults_to_ccw():
+def test_target_velocity_purely_radial_input_defaults_to_ccw() -> None:
     """Edge case: if v has zero tangential component (purely radial), the
     flip condition (`dot < 0`) never triggers, so the implementation
     defaults to the CCW direction.  This test documents that behavior."""
@@ -457,7 +460,7 @@ def test_target_velocity_purely_radial_input_defaults_to_ccw():
     np.testing.assert_allclose(result, [0.0, expected_speed], atol=1e-6)
 
 
-def test_target_velocity_arbitrary_angle_ccw():
+def test_target_velocity_arbitrary_angle_ccw() -> None:
     """r at an arbitrary angle (not on an axis); v purely tangential CCW."""
     sim = Simulator(
         MU,
@@ -482,7 +485,7 @@ def test_target_velocity_arbitrary_angle_ccw():
     assert np.dot(result, r) == pytest.approx(0.0, abs=1e-6)
 
 
-def test_target_velocity_arbitrary_angle_cw_with_radial_component():
+def test_target_velocity_arbitrary_angle_cw_with_radial_component() -> None:
     """r at an arbitrary angle, in a different quadrant; v has both a
     radial (outward) and a CW tangential component.  Result direction
     should follow the tangential (CW) sign, ignoring the radial part."""
@@ -514,7 +517,7 @@ def test_target_velocity_arbitrary_angle_cw_with_radial_component():
 # --- find_linear_tangent_params (SLSQP) tests ---
 
 
-def test_find_linear_tangent_params_converges(sim):
+def test_find_linear_tangent_params_converges(sim: Simulator) -> None:
     """End-to-end regression test using real flight data (from main()):
     the SLSQP solve should produce a circular orbit at (or just above) the
     target altitude, within the burn-time bounds.
@@ -535,11 +538,11 @@ def test_find_linear_tangent_params_converges(sim):
     # original r3d/v3d up to plan.coast_time) -- CircularizationPlan no
     # longer carries r_coast/v_coast itself.
     plane = plan.plane
-    r0, v0 = to_rv(
-        sim.solve_coast(
-            (0, TIME_TO_APOAPSIS), plane.to_plane(R3D), plane.to_plane(V3D)
-        ).sol(plan.coast_time)
+    coast_solution = sim.solve_coast(
+        (0, TIME_TO_APOAPSIS), plane.to_plane(R3D), plane.to_plane(V3D)
     )
+    assert coast_solution.sol is not None
+    r0, v0 = to_rv(np.asarray(coast_solution.sol(plan.coast_time), dtype=float))
     result = sim.propagate_linear_tangent(
         r0,
         v0,
@@ -561,7 +564,9 @@ def test_find_linear_tangent_params_converges(sim):
     assert final_orbit.periapsis_radius == pytest.approx(sim.target_radius, abs=50.0)
 
 
-def test_find_linear_tangent_params_memoizes_simulation(monkeypatch):
+def test_find_linear_tangent_params_memoizes_simulation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """No two calls to propagate_linear_tangent during a single
     find_linear_tangent_params run should have identical arguments --
     i.e. the memoized `simulate` helper should dedupe repeated evaluations
@@ -577,7 +582,15 @@ def test_find_linear_tangent_params_memoizes_simulation(monkeypatch):
     calls: list[tuple[float, ...]] = []
     original = Simulator.propagate_linear_tangent
 
-    def spy(self, r, v, a_coeff, b_coeff, ref_angle, burn_time):
+    def spy(
+        self: Simulator,
+        r: Vector,
+        v: Vector,
+        a_coeff: float,
+        b_coeff: float,
+        ref_angle: float,
+        burn_time: float,
+    ) -> BurnResult:
         key = (
             round(float(r[0]), 6),
             round(float(r[1]), 6),
@@ -604,7 +617,7 @@ def test_find_linear_tangent_params_memoizes_simulation(monkeypatch):
 # --- Continuous-time / staging-time bookkeeping tests ---
 
 
-def test_solve_linear_tangent_t_offset(sim):
+def test_solve_linear_tangent_t_offset(sim: Simulator) -> None:
     """solve_linear_tangent's t domain should start at t_offset (not 0),
     so that the linear-tangent steering law's time reference continues
     from wherever a previous segment left off."""
@@ -629,12 +642,12 @@ def test_solve_linear_tangent_t_offset(sim):
     assert initial_state[4] == pytest.approx(SWIVEL.initial_mass)
 
 
-def test_total_burn_budget_includes_staging(sim):
+def test_total_burn_budget_includes_staging(sim: Simulator) -> None:
     expected = SWIVEL.max_burn_time + TERRIER.max_burn_time + 1.0
     assert sim.total_burn_budget() == pytest.approx(expected)
 
 
-def test_total_burn_budget_single_segment_no_staging_coast():
+def test_total_burn_budget_single_segment_no_staging_coast() -> None:
     single_segment_sim = Simulator(
         MU,
         body_radius=KERBIN_RADIUS,
@@ -645,7 +658,7 @@ def test_total_burn_budget_single_segment_no_staging_coast():
     assert single_segment_sim.total_burn_budget() == pytest.approx(SWIVEL.max_burn_time)
 
 
-def test_total_burn_budget_no_staging_coast_when_not_last_segment_of_stage():
+def test_total_burn_budget_no_staging_coast_when_not_last_segment_of_stage() -> None:
     """No 1 second staging coast should be added after a segment whose
     last_segment_of_stage is False, since no real part separation happens
     there -- the next segment continues immediately."""
@@ -695,7 +708,9 @@ def test_total_burn_budget_no_staging_coast_when_not_last_segment_of_stage():
     assert with_coast_sim.total_burn_budget() == pytest.approx(31.0)
 
 
-def test_propagate_linear_tangent_burn_time_includes_staging_seconds(sim):
+def test_propagate_linear_tangent_burn_time_includes_staging_seconds(
+    sim: Simulator,
+) -> None:
     """burn_time should include the 1 second staging coast, so the second
     segment should only burn for `burn_time - segment1.max_burn_time - 1.0`
     seconds, not `burn_time - segment1.max_burn_time`."""
@@ -712,7 +727,9 @@ def test_propagate_linear_tangent_burn_time_includes_staging_seconds(sim):
     assert result.mass == pytest.approx(expected_mass)
 
 
-def test_propagate_linear_tangent_deadline_inside_staging_window(sim):
+def test_propagate_linear_tangent_deadline_inside_staging_window(
+    sim: Simulator,
+) -> None:
     """If burn_time's deadline falls inside the mandatory 1 second staging
     coast, only a partial coast should be applied, and segment 2 should not
     be started at all."""
@@ -729,16 +746,18 @@ def test_propagate_linear_tangent_deadline_inside_staging_window(sim):
     solution1 = sim.solve_linear_tangent(
         0, SWIVEL.max_burn_time, r0, v0, SWIVEL, 0.0, 0.0, 0.0
     )
-    r1, v1, mass1 = to_rvm(solution1.y[:, -1])
+    r1, v1, mass1 = to_rvm(np.asarray(solution1.y[:, -1], dtype=float))
     coast = sim.solve_coast((0, partial_staging_time), r1, v1)
-    r_expected, v_expected = to_rv(coast.y[:, -1])
+    r_expected, v_expected = to_rv(np.asarray(coast.y[:, -1], dtype=float))
 
     assert result.mass == pytest.approx(mass1)
     assert result.r == pytest.approx(r_expected)
     assert result.v == pytest.approx(v_expected)
 
 
-def test_propagate_linear_tangent_continuous_time_across_segments(sim, monkeypatch):
+def test_propagate_linear_tangent_continuous_time_across_segments(
+    sim: Simulator, monkeypatch: pytest.MonkeyPatch
+) -> None:
     """solve_linear_tangent's t_offset should continue from wherever the
     previous segment plus staging coast left off, not reset to 0 at the
     start of each segment."""
@@ -749,7 +768,17 @@ def test_propagate_linear_tangent_continuous_time_across_segments(sim, monkeypat
     t_offsets: list[float] = []
     original = Simulator.solve_linear_tangent
 
-    def spy(self, t_offset, duration, r, v, segment, a_coeff, b_coeff, ref_angle):
+    def spy(
+        self: Simulator,
+        t_offset: float,
+        duration: float,
+        r: Vector,
+        v: Vector,
+        segment: RocketSegment,
+        a_coeff: float,
+        b_coeff: float,
+        ref_angle: float,
+    ) -> OdeResult:
         t_offsets.append(t_offset)
         return original(
             self, t_offset, duration, r, v, segment, a_coeff, b_coeff, ref_angle
@@ -764,8 +793,8 @@ def test_propagate_linear_tangent_continuous_time_across_segments(sim, monkeypat
 
 
 def test_propagate_linear_tangent_no_staging_coast_when_not_last_segment_of_stage(
-    monkeypatch,
-):
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """When a segment's last_segment_of_stage is False, propagate_linear_tangent
     should transition straight into the next segment with no 1 second staging
     coast: the next segment's solve_linear_tangent call should start at the
@@ -801,7 +830,17 @@ def test_propagate_linear_tangent_no_staging_coast_when_not_last_segment_of_stag
     t_offsets: list[float] = []
     original = Simulator.solve_linear_tangent
 
-    def spy(self, t_offset, duration, r, v, segment, a_coeff, b_coeff, ref_angle):
+    def spy(
+        self: Simulator,
+        t_offset: float,
+        duration: float,
+        r: Vector,
+        v: Vector,
+        segment: RocketSegment,
+        a_coeff: float,
+        b_coeff: float,
+        ref_angle: float,
+    ) -> OdeResult:
         t_offsets.append(t_offset)
         return original(
             self, t_offset, duration, r, v, segment, a_coeff, b_coeff, ref_angle
@@ -818,27 +857,27 @@ def test_propagate_linear_tangent_no_staging_coast_when_not_last_segment_of_stag
 # --- OrbitalPlane tests ---
 
 
-def test_orbital_plane_eq_same_vectors():
+def test_orbital_plane_eq_same_vectors() -> None:
     plane1 = OrbitalPlane(R3D, V3D)
     plane2 = OrbitalPlane(R3D, V3D)
 
     assert plane1 == plane2
 
 
-def test_orbital_plane_eq_different_vectors():
+def test_orbital_plane_eq_different_vectors() -> None:
     plane1 = OrbitalPlane(R3D, V3D)
     plane2 = OrbitalPlane(COAST_START.r3d, COAST_START.v3d)
 
     assert plane1 != plane2
 
 
-def test_orbital_plane_eq_not_implemented_for_other_types():
+def test_orbital_plane_eq_not_implemented_for_other_types() -> None:
     plane = OrbitalPlane(R3D, V3D)
 
     assert plane != "not a plane"
 
 
-def test_orbital_plane_repr_contains_basis_vectors():
+def test_orbital_plane_repr_contains_basis_vectors() -> None:
     plane = OrbitalPlane(R3D, V3D)
 
     text = repr(plane)
@@ -847,7 +886,7 @@ def test_orbital_plane_repr_contains_basis_vectors():
     assert "w_hat" in text
 
 
-def test_orbital_plane_to_plane_from_plane_roundtrip():
+def test_orbital_plane_to_plane_from_plane_roundtrip() -> None:
     plane = OrbitalPlane(R3D, V3D)
 
     v2d = vector(123.4, -567.8)
