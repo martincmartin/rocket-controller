@@ -951,7 +951,7 @@ def main() -> None:
         SEGMENTS = [
             RocketSegment(
                 name='LV-T45 "Swivel" Liquid Fuel Engine',
-                ve=3138.1279999999997,
+                ve=3138.128,
                 thrust=215000.0,
                 max_burn_time=59.0500960010656,
                 initial_mass=13885.650390625,
@@ -959,7 +959,7 @@ def main() -> None:
             ),
             RocketSegment(
                 name='LV-909 "Terrier" Liquid Fuel Engine',
-                ve=3383.2942499999995,
+                ve=3383.29425,
                 thrust=60000.0,
                 max_burn_time=112.77647255563578,
                 initial_mass=4449.999407536325,
@@ -996,3 +996,33 @@ if __name__ == "__main__":
 #     - Burn time: 119.67 sec
 #     - Final vessel mass: 3392.68 kg
 #     - Apoapsis at staging: 83032.30
+
+# Another test case, this one with apoapsis already around 81km:
+SEGMENTS = [
+    RocketSegment(
+        name='LV-T45 "Swivel" Liquid Fuel Engine',
+        ve=3138.128,
+        thrust=215000.0,
+        max_burn_time=28.27566676857025,
+        initial_mass=11777.2275390625,
+        last_segment_of_stage=True,
+    ),
+    RocketSegment(
+        name='LV-909 "Terrier" Liquid Fuel Engine',
+        ve=3383.29425,
+        thrust=60000.0,
+        max_burn_time=112.77647255563578,
+        initial_mass=4449.999885100777,
+        last_segment_of_stage=True,
+    ),
+]
+R3D = np.array([433284.5917063, -704.8282711, -459791.995176])
+V3D = np.array([1323.15860984, 11.49193645, 135.66254872])
+TIME_TO_APOAPSIS = 124.74389992322136
+
+
+# Key finding: the sharp oracle's S(t) is tiny everywhere — S(0)=2.3e-3, coast dips only
+# to -5.75e-5, burn 2 peaks at 1.6e-6. So eps=1e-4 is not small relative to S: the coast
+# throttle would be expit(-0.575)≈0.36 even at the exact optimum. Let me continue the
+# eps schedule below 1e-4 to see if the smeared root sharpens or persists (singular-arc
+# limit), and check the sharp-system residual of the smeared root.
