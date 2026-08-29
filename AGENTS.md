@@ -45,9 +45,10 @@ probably want a new helper instead.
 
 # Scratch files (not part of the repo)
 
-`explore.py` is a gitignored scratchpad for ad-hoc analysis scripts. Write
-throwaway scripts there rather than in the repo root -- they won't be committed
-and won't show up in `git status`. PLAN.md is also gitignored.
+`explore.py` is a gitignored scratchpad only for the user, never write or
+overwrite this unless explicitly instructed.  When writing ad-hoc code to
+evaluate, understand or plan, that's not production code, write it in
+experiments/ . PLAN.md is also gitignored.
 
 # Planning
 
