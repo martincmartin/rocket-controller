@@ -5,7 +5,7 @@ cycler==0.12.1
 fonttools==4.63.0
 iniconfig==2.3.0
 joblib==1.5.3
-kiwisolver==1.5.0
+kiwisolver==1.5.1
 krpc==0.6.0
 librt==0.15.0
 matplotlib==3.11.1
@@ -16,14 +16,14 @@ nodeenv==1.10.0
 numpy==2.5.2
 numpy-typing-compat==20260602.2.5
 optype==0.18.0
-packaging==26.2
+packaging==26.3
 pathspec==1.1.1
 pillow==12.3.0
 pluggy==1.6.0
 protobuf==7.35.1
 pyaml==26.7.0
-pydantic==2.13.4
-pydantic_core==2.46.4
+pydantic==2.13.5
+pydantic_core==2.46.5
 Pygments==2.20.0
 pyparsing==3.3.2
 pyright==1.1.411
@@ -37,5 +37,5 @@ scipy==1.18.1
 scipy-stubs==1.18.1.0
 six==1.17.0
 threadpoolctl==3.6.0
-typing-inspection==0.4.2
+typing-inspection==0.4.4
 typing_extensions==4.16.0
