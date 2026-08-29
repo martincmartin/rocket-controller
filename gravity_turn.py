@@ -216,6 +216,8 @@ class GravityTurn:
             - (last_segment.thrust / last_segment.ve) * last_segment.max_burn_time
         )
         print(f"dry mass: {self.dry_mass}")
+        for segment in self.segments:
+            print(segment)
 
         situations = self.fs.space_center.VesselSituation
         pre_launch_situation = situations.pre_launch
@@ -415,6 +417,10 @@ class GravityTurn:
         r3d = np.array(streams.position)
         v3d = np.array(streams.velocity)
         tta = streams.time_to_apoapsis
+
+        print(f"R3D = np.array({r3d})")
+        print(f"V3D = np.array({v3d})")
+        print(f"TIME_TO_APOAPSIS = {tta}")
 
         # Do we need ut0 for anything else?
         self.ut0 = streams.ut
