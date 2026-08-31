@@ -1,0 +1,7 @@
+# Implicit Mass
+
+John Prussing, in Optimal Spacecraft Trajectories, likes to have implicit mass.  Now that we've given up going full Lawden, and making the burn start/end times explicit instead of implicit, we could adopt Pressing's implicit mass, and maybe save a costate.  I'd have to think through how this works with stitching different arcs (burn & coast) together.  For example, no longer the Mayer form of the cost function but now the Lagrange form (total $\Delta V$, integrated from the thrust acceleration magnitude through all arcs?)
+
+It seems straight forward: the thrust term of the Hamiltonian changes to $\Gamma(1-p)$ where $\Gamma$ is the thrust acceleration magnitude and $p$ is the primer vector magnitude, which is actually simpler than what we had before, the switching function is now just $1-p$.  Everything else is the same, except no mass costate, so parameters to optimize over are only primer angle and $\lambda_r$ plus the various burn/coast times.
+
+Staging is handled easily; Ve, Tmax and mass don't appear, so you don't have to worry about what happens when they change.  You have a discontinuous change to $\Gamma$, but that causes a "kink" not a discontinuity.  No solving for the new mass costate!

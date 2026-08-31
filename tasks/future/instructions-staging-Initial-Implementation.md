@@ -4,6 +4,8 @@ Staging (in practice) has two different, separable parts: an instantaneous chang
 
 For the coast, H changes during the coast, but H just after the coast (engines burning again) is exactly the same as H just before the coast (engines burning, just about to shut off).
 
+NOTE: If you make mass implicit, there's no mass costate to solve for and the instantaneous staging proper is even easier!
+
 ## Changes (Staging Proper, Instantaneous)
 
 Hamiltonian is continuous, as are the position and velocity costates, so the mass costate must absorb all the changes.  Although the Hamiltonian is zero on the optimal route, it is non-zero during many evaluations during optimization, so we want to conserve H during staging proper, not solve from H=0, as we're using H as a residual.
