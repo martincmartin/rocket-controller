@@ -20,8 +20,9 @@ This is the "final suggestion" pipeline of `review-sigmoid-primer.md`
    variables) is seeded with the sigmoid parameters. It re-derives the
    burn/coast partition from the switching function and returns exact
    event times, so a smeared sigmoid endpoint still yields the correct
-   structure. The polish uses `lm` first and falls back to bounded `trf`
-   when `lm` leaves the bounds.
+   structure. The polish runs `lm` first and skips the `trf` pass when
+   `lm` gets within `POLISH_SKIP_TRF_RES` of a root; otherwise `trf` runs
+   and the smaller-residual result is kept.
 
 Solver details:
 - All solves use finite differences. No analytic Jacobian.
@@ -43,6 +44,7 @@ from __future__ import annotations
 import argparse
 import json
 import math
+import os
 import sys
 import time
 from dataclasses import dataclass, field
@@ -91,8 +93,9 @@ MAX_EPS_STEPS = 40
 RENDER_Q_MIN = 0.01
 RENDER_Q_MAX = 0.99
 RESIDUAL_SUCCESS = 2e-6
-SIGMOID_NFEV = 1000
-POLISH_NFEV = 5000
+SIGMOID_NFEV = 300
+POLISH_NFEV = 3000
+POLISH_SKIP_TRF_RES = 1e-4
 SIGMOID_TOLERANCES = {"ftol": 2e-10, "xtol": 2e-10, "gtol": 2e-10}
 POLISH_TOLERANCES = {"ftol": 2e-12, "xtol": 2e-12, "gtol": 2e-12}
 
@@ -131,6 +134,13 @@ class SolverOutcome:
     polish_nfev: int
     eps_history: list[dict[str, float]]
     wall_seconds: float
+    user_cpu_seconds: float
+    system_cpu_seconds: float
+    polish_wall_seconds: float
+    polish_cpu_seconds: float
+    polish_lm_nfev: int
+    polish_trf_nfev: int
+    polish_method: str
     reference: Reference = field(default_factory=lambda: cast(Reference, {}))
 
     def to_dict(self) -> dict[str, Any]:
@@ -152,6 +162,13 @@ class SolverOutcome:
             "polish_nfev": self.polish_nfev,
             "eps_history": self.eps_history,
             "wall_seconds": self.wall_seconds,
+            "user_cpu_seconds": self.user_cpu_seconds,
+            "system_cpu_seconds": self.system_cpu_seconds,
+            "polish_wall_seconds": self.polish_wall_seconds,
+            "polish_cpu_seconds": self.polish_cpu_seconds,
+            "polish_lm_nfev": self.polish_lm_nfev,
+            "polish_trf_nfev": self.polish_trf_nfev,
+            "polish_method": self.polish_method,
             "reference": self.reference,
         }
 
@@ -271,19 +288,27 @@ def sigmoid_continuation(
     history: list[dict[str, float]] = []
     stop_reason = "epsilon-floor"
 
+    wall_start = time.perf_counter()
+    cpu_start = time.process_time()
     parameters, result, residual = sigmoid_solve(
         case, parameters, epsilon, "trf", SIGMOID_NFEV
     )
-    total_nfev += int(result.nfev)
+    first_wall = time.perf_counter() - wall_start
+    first_cpu = time.process_time() - cpu_start
+    first_nfev = int(result.nfev)
+    total_nfev += first_nfev
     profile = rendered_throttle(case, parameters, epsilon)
     history.append(
         {
             "epsilon": epsilon,
-            "nfev": float(result.nfev),
+            "nfev": float(first_nfev),
+            "total_nfev": float(first_nfev),
             "residual": residual,
             "q_min": float(profile["q_min"]),
             "q_max": float(profile["q_max"]),
             "solver": float(FIRST_STEP),
+            "wall_s": first_wall,
+            "cpu_s": first_cpu,
         }
     )
     if render_ok(profile):
@@ -295,32 +320,51 @@ def sigmoid_continuation(
         epsilon /= EPS_FACTOR
         inherited_residual = norm(sp.sigmoid_residual(case, parameters, epsilon))
         chosen: tuple[Array, float, int, int] | None = None
+        step_wall = 0.0
+        step_cpu = 0.0
+        step_nfev_total = 0
 
+        wall_start = time.perf_counter()
+        cpu_start = time.process_time()
         p_lm, result_lm, res_lm = sigmoid_solve(
             case, parameters, epsilon, "lm", SIGMOID_NFEV
         )
+        step_wall += time.perf_counter() - wall_start
+        step_cpu += time.process_time() - cpu_start
+        step_nfev_total += int(result_lm.nfev)
         total_nfev += int(result_lm.nfev)
         if in_bounds(p_lm, lower, upper) and res_lm <= inherited_residual * 1.01:
             chosen = (p_lm, res_lm, int(result_lm.nfev), LM_STEP)
         else:
+            wall_start = time.perf_counter()
+            cpu_start = time.process_time()
             p_trf, result_trf, res_trf = sigmoid_solve(
                 case, parameters, epsilon, "trf", SIGMOID_NFEV
             )
+            step_wall += time.perf_counter() - wall_start
+            step_cpu += time.process_time() - cpu_start
+            step_nfev_total += int(result_trf.nfev)
             total_nfev += int(result_trf.nfev)
             if in_bounds(p_trf, lower, upper) and res_trf <= inherited_residual * 1.01:
                 chosen = (p_trf, res_trf, int(result_trf.nfev), TRF_STEP)
 
         if chosen is None:
+            profile = rendered_throttle(case, parameters, epsilon)
             history.append(
                 {
                     "epsilon": epsilon,
                     "nfev": 0.0,
+                    "total_nfev": float(step_nfev_total),
                     "residual": inherited_residual,
-                    "q_min": float("nan"),
-                    "q_max": float("nan"),
+                    "q_min": float(profile["q_min"]),
+                    "q_max": float(profile["q_max"]),
                     "solver": float(INHERITED),
+                    "wall_s": step_wall,
+                    "cpu_s": step_cpu,
                 }
             )
+            if render_ok(profile):
+                stop_reason = "render-ok"
             continue
         parameters, residual, step_nfev, marker = chosen
         profile = rendered_throttle(case, parameters, epsilon)
@@ -328,10 +372,13 @@ def sigmoid_continuation(
             {
                 "epsilon": epsilon,
                 "nfev": float(step_nfev),
+                "total_nfev": float(step_nfev_total),
                 "residual": residual,
                 "q_min": float(profile["q_min"]),
                 "q_max": float(profile["q_max"]),
                 "solver": float(marker),
+                "wall_s": step_wall,
+                "cpu_s": step_cpu,
             }
         )
         if render_ok(profile):
@@ -365,23 +412,40 @@ def sharp_solve(
 def sharp_polish(
     case: Case, seed: Array
 ) -> tuple[
-    Array, Any, Array, list[float], float, float, list[dict[str, float]], list[float]
+    Array,
+    Any,
+    Array,
+    list[float],
+    float,
+    float,
+    list[dict[str, float]],
+    list[float],
+    int,
+    int,
+    str,
 ]:
-    """Polish with both lm and trf and keep the smaller-residual result.
+    """Polish with lm first and trf only when lm does not get close enough.
 
-    `lm` is usually the better and cheaper choice (review section 3.3), but
-    on some cases it can stop in a spurious local minimum of the squared
-    residual; `trf` recovers those cases. Picking by final residual handles
-    both outcomes.
+    `lm` is usually the better and cheaper choice (review section 3.3). When
+    its final residual is below `POLISH_SKIP_TRF_RES` the `trf` pass is
+    skipped entirely; otherwise `trf` runs too (it recovers the cases where
+    `lm` stops in a spurious local minimum of the squared residual, e.g.
+    `kerbin-coast-first-example`) and the smaller-residual result is kept.
     """
     lower, upper = sigmoid_bounds(case)
-    candidates: list[tuple[float, Array, Any, str]] = []
     p_lm, result_lm, res_lm = sharp_solve(case, seed, "lm", POLISH_NFEV)
-    if in_bounds(p_lm, lower, upper):
-        candidates.append((res_lm, p_lm, result_lm, "lm"))
-    p_trf, result_trf, res_trf = sharp_solve(case, seed, "trf", POLISH_NFEV)
-    candidates.append((res_trf, p_trf, result_trf, "trf"))
-    _, parameters, result, method = min(candidates, key=lambda item: item[0])
+    trf_nfev = 0
+    lm_acceptable = in_bounds(p_lm, lower, upper) and res_lm < POLISH_SKIP_TRF_RES
+    if lm_acceptable:
+        parameters, result, method = p_lm, result_lm, "lm"
+    else:
+        candidates: list[tuple[float, Array, Any, str]] = []
+        if in_bounds(p_lm, lower, upper):
+            candidates.append((res_lm, p_lm, result_lm, "lm"))
+        p_trf, result_trf, res_trf = sharp_solve(case, seed, "trf", POLISH_NFEV)
+        trf_nfev = int(result_trf.nfev)
+        candidates.append((res_trf, p_trf, result_trf, "trf"))
+        _, parameters, result, method = min(candidates, key=lambda item: item[0])
     result.message = f"{method}: {result.message}"
     residual = implicit_residual(case, parameters)
     _state, switch_times, _events, final_joint, thrust_time, arcs = implicit_propagate(
@@ -420,16 +484,31 @@ def sharp_polish(
         float(1.0 - final_joint[3]),
         arc_records,
         final_joint[:4].tolist(),
+        int(result_lm.nfev),
+        trf_nfev,
+        method,
     )
 
 
 def solve(case: Case) -> SolverOutcome:
-    started = time.monotonic()
+    wall_started = time.monotonic()
+    times_started = os.times()
+
+    def cpu_accounting() -> tuple[float, float, float]:
+        wall = time.monotonic() - wall_started
+        times_ended = os.times()
+        return (
+            wall,
+            times_ended.user - times_started.user,
+            times_ended.system - times_started.system,
+        )
+
     try:
         sigmoid_parameters, eps_stop, history, sigmoid_nfev, stop_reason = (
             sigmoid_continuation(case)
         )
     except (FloatingPointError, ValueError, ZeroDivisionError) as error:
+        wall, user_cpu, system_cpu = cpu_accounting()
         return SolverOutcome(
             case_name=case.name,
             success=False,
@@ -446,9 +525,18 @@ def solve(case: Case) -> SolverOutcome:
             sigmoid_nfev=0,
             polish_nfev=0,
             eps_history=[],
-            wall_seconds=time.monotonic() - started,
+            wall_seconds=wall,
+            user_cpu_seconds=user_cpu,
+            system_cpu_seconds=system_cpu,
+            polish_wall_seconds=0.0,
+            polish_cpu_seconds=0.0,
+            polish_lm_nfev=0,
+            polish_trf_nfev=0,
+            polish_method="none",
         )
     try:
+        polish_wall_start = time.perf_counter()
+        polish_cpu_start = time.process_time()
         (
             polish_parameters,
             polish_result,
@@ -458,8 +546,13 @@ def solve(case: Case) -> SolverOutcome:
             fuel,
             arcs,
             final_state,
+            polish_lm_nfev,
+            polish_trf_nfev,
+            polish_method,
         ) = sharp_polish(case, sigmoid_parameters)
-        polish_nfev = int(polish_result.nfev)
+        polish_wall_seconds = time.perf_counter() - polish_wall_start
+        polish_cpu_seconds = time.process_time() - polish_cpu_start
+        polish_nfev = polish_lm_nfev + polish_trf_nfev
         polish_residual_norm = norm(polish_residual)
         success = bool(
             polish_result.success and polish_residual_norm < RESIDUAL_SUCCESS
@@ -474,6 +567,7 @@ def solve(case: Case) -> SolverOutcome:
                 f"(residual {polish_residual_norm:.2e}; sigmoid eps stopped at "
                 f"{eps_stop:.2e}, {stop_reason})"
             )
+        wall, user_cpu, system_cpu = cpu_accounting()
         return SolverOutcome(
             case_name=case.name,
             success=success,
@@ -490,11 +584,19 @@ def solve(case: Case) -> SolverOutcome:
             sigmoid_nfev=sigmoid_nfev,
             polish_nfev=polish_nfev,
             eps_history=history,
-            wall_seconds=time.monotonic() - started,
+            wall_seconds=wall,
+            user_cpu_seconds=user_cpu,
+            system_cpu_seconds=system_cpu,
+            polish_wall_seconds=polish_wall_seconds,
+            polish_cpu_seconds=polish_cpu_seconds,
+            polish_lm_nfev=polish_lm_nfev,
+            polish_trf_nfev=polish_trf_nfev,
+            polish_method=polish_method,
             reference=REFERENCES.get(case.name, {}),
         )
     except (FloatingPointError, ValueError, ZeroDivisionError) as error:
         sigmoid_residual = sp.sigmoid_residual(case, sigmoid_parameters, eps_stop)
+        wall, user_cpu, system_cpu = cpu_accounting()
         return SolverOutcome(
             case_name=case.name,
             success=False,
@@ -511,7 +613,14 @@ def solve(case: Case) -> SolverOutcome:
             sigmoid_nfev=sigmoid_nfev,
             polish_nfev=0,
             eps_history=history,
-            wall_seconds=time.monotonic() - started,
+            wall_seconds=wall,
+            user_cpu_seconds=user_cpu,
+            system_cpu_seconds=system_cpu,
+            polish_wall_seconds=0.0,
+            polish_cpu_seconds=0.0,
+            polish_lm_nfev=0,
+            polish_trf_nfev=0,
+            polish_method="none",
         )
 
 
@@ -539,7 +648,10 @@ def main() -> None:
             f"tf={final_time:.9f} switches={len(outcome.switch_times)} "
             f"eps_stop={outcome.eps_stop:.2e} "
             f"nfev={outcome.sigmoid_nfev + outcome.polish_nfev} "
-            f"[{outcome.wall_seconds:.1f}s]"
+            f"(sig={outcome.sigmoid_nfev} pol_lm={outcome.polish_lm_nfev} "
+            f"pol_trf={outcome.polish_trf_nfev}->{outcome.polish_method}) "
+            f"[{outcome.wall_seconds:.1f}s wall / {outcome.user_cpu_seconds:.1f}s user "
+            f"/ {outcome.system_cpu_seconds:.1f}s sys]"
         )
         print(f"    {outcome.message}")
     if arguments.output:
