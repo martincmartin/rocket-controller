@@ -43,17 +43,22 @@ The split is enforced conceptually: planner code must not import kRPC; flight
 code must not contain physics. If you're tempted to cross the line, you
 probably want a new helper instead.
 
+# Tasks directory
+
+The `tasks` directory contains one sub directory for each task, prefixed by the
+start date.  Inside each one is an instructions.md for that particular task.
+After reading it, create a PLAN.md in the same directory and wait for user
+feedback.  You can create any temporary scripts, reports or work files in here.
+This directory will be comitted then deleted once the task is done.  Any
+information relevant to understanding design decisions or other choices should
+go either in comments in the production code, or in the docs/ directory.
+
 # Scratch files (not part of the repo)
 
 `explore.py` is a gitignored scratchpad only for the user, never write or
 overwrite this unless explicitly instructed.  When writing ad-hoc code to
 evaluate, understand or plan, that's not production code, write it in
 experiments/ . PLAN.md is also gitignored.
-
-# Planning
-
-When asked to create or modify a plan, write it to `PLAN.md`, overwriting any
-previous contents so the file always reflects the most up-to-date plan.
 
 # kRPC connection note (from TODO.md)
 
