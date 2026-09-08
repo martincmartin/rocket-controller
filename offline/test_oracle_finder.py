@@ -378,7 +378,7 @@ def test_already_targeted_state_returns_empty_plan() -> None:
 def test_unsupported_lawden_sequence_is_reported(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    def fake_lawden(problem: object, _explicit: Candidate) -> Candidate:
+    def fake_lawden(problem: object, _timing: object) -> Candidate:
         return Candidate(
             name="lawden",
             formulation="lawden-sigmoid-hard-polish",
@@ -433,8 +433,8 @@ def test_all_candidates_failed_error_path(monkeypatch: pytest.MonkeyPatch) -> No
         del problem, timing
         return failed_candidate(mode)
 
-    def fail_lawden(problem: object, explicit: Candidate) -> Candidate:
-        del problem, explicit
+    def fail_lawden(problem: object, timing: object) -> Candidate:
+        del problem, timing
         return failed_candidate("lawden")
 
     monkeypatch.setattr(oracle_finder, "_solve_explicit_mode", fail_explicit)
@@ -449,6 +449,42 @@ def test_all_candidates_failed_error_path(monkeypatch: pytest.MonkeyPatch) -> No
     assert "burn_coast_burn" in message
     assert "coast_burn" in message
     assert "burn_only" in message
+
+
+def test_lawden_succeeds_without_explicit_results(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def failed_explicit(problem: object, mode: str, timing: object) -> Candidate:
+        del problem, timing
+        return Candidate(
+            name=mode,
+            formulation="test",
+            success=False,
+            message="forced failure",
+            parameters=np.zeros(1, dtype=float),
+            residual=np.full(1, 4.0),
+            final_state=None,
+            final_eta=None,
+            phases=[],
+            powered_tau=0.0,
+            final_tau=0.0,
+            limit_hit=False,
+            sequence=(),
+            diagnostics={"kappa": 1.0},
+        )
+
+    monkeypatch.setattr(oracle_finder, "_solve_explicit_mode", failed_explicit)
+    position, velocity, segments = kerbin_examples()["kerbin-first-example"]
+
+    result = find_oracle(position, velocity, segments)
+
+    lawden = next(
+        candidate for candidate in result.candidates if candidate.name == "lawden"
+    )
+    assert lawden.success
+    assert result.selected.name == "lawden"
+    seed_results = cast(list[object], lawden.diagnostics["seed_results"])
+    assert len(seed_results) == 8
 
 
 def test_limit_binding_candidate_warns() -> None:

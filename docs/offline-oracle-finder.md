@@ -177,6 +177,32 @@ Also use the existing deterministic direction sweep: initial velocity,
 tangential, and predicted-apoapsis-prograde directions. Do not copy the old
 mass-costate sweep because explicit candidates have no mass costate.
 
+### Lawden Initial Values
+
+The Lawden candidate starts from the same closed-form estimates, never from the
+output of an explicit solver. Seeding it with a converged explicit result
+would be circular: a fixed-sequence solution cannot guide a search for a
+sequence outside the fixed families. The purpose of the Lawden run is to
+discover such sequences, so its seed must be independent.
+
+The Lawden seed vector is
+$(\alpha_0,\tau_f,\lambda_{\rho,0},\lambda_{\eta,0})$, with
+$\lambda_{\eta,0}=-\kappa$. Build it from rough computed estimates and their
+variations:
+
+- The three primer directions: initial velocity, tangential, and prograde at
+  the predicted apoapsis.
+- Four final-time shapes from the impulse timing estimate: both burns and the
+  coast, coast then burn, both burns without a coast, and a longer bounded
+  guess (at most half again the base duration or eight tenths of the time
+  limit).
+- Three $\lambda_{\rho,0}$ factors around the $H(0)=0$ estimate, with the
+  bounded fallback near apoapsis.
+
+This gives eight structured seeds. The solver runs the full epsilon ladder and
+the polish for every seed and keeps the best accepted result. The per-seed
+outcomes are recorded in `seed_results` so the multistart is auditable.
+
 ## Result Data
 
 Return a typed result and a JSON form. The result will contain:

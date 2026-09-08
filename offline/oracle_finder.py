@@ -1508,32 +1508,113 @@ def _lawden_hard_residual(problem: Problem, parameters: Array) -> Array:
         return np.full(4, INVALID_RESIDUAL)
 
 
-def _solve_lawden(problem: Problem, explicit: Candidate) -> Candidate:
-    if explicit.success and len(explicit.parameters) >= 6:
-        p_r = float(explicit.parameters[1])
-        p_t = float(explicit.parameters[2])
-        alpha = math.atan2(p_t, p_r)
-        final_tau = explicit.final_tau
-        lambda_rho = float(explicit.parameters[0])
-    else:
-        direction = problem.velocity / _norm(problem.velocity)
-        alpha = math.atan2(float(direction[1]), float(direction[0]))
-        final_tau = min(problem.time_limit * 0.8, problem.stage.max_burn_tau)
+def _lawden_seeds(problem: Problem, timing: TimingSeed) -> list[Array]:
+    velocity_direction = problem.velocity.copy()
+    velocity_direction /= _norm(velocity_direction)
+    directions = [
+        velocity_direction,
+        np.array([0.0, 1.0], dtype=float),
+        np.array(
+            [
+                math.cos(_prograde_apoapsis_angle(problem.radius, problem.velocity)),
+                math.sin(_prograde_apoapsis_angle(problem.radius, problem.velocity)),
+            ],
+            dtype=float,
+        ),
+    ]
+    base_final_tau = timing.burn_raise_apoapsis + timing.coast + timing.burn_circularize
+    final_time_shapes = [
+        base_final_tau,
+        timing.coast + timing.burn_circularize,
+        min(
+            timing.burn_raise_apoapsis + timing.burn_circularize,
+            0.95 * problem.stage.max_burn_tau,
+        ),
+        min(0.8 * problem.time_limit, 1.5 * base_final_tau),
+    ]
+
+    def make(direction: Array, final_tau: float, lambda_rho: float) -> Array:
+        return np.asarray(
+            [
+                math.atan2(float(direction[1]), float(direction[0])),
+                final_tau,
+                lambda_rho,
+                -problem.stage.kappa,
+            ],
+            dtype=float,
+        )
+
+    base_direction = directions[0]
+    base_lambda = _lambda_rho_seed(problem.radius, problem.velocity, base_direction)
+    lambda_values = (base_lambda * 0.5, base_lambda, base_lambda * 2.0)
+    if abs(base_lambda) <= 1e-12:
+        lambda_values = (-1.0, 0.0, 1.0)
+
+    seeds: list[Array] = []
+    seeds.append(make(base_direction, base_final_tau, lambda_values[1]))
+    for direction in directions[1:]:
         lambda_rho = _lambda_rho_seed(problem.radius, problem.velocity, direction)
-    seed = np.array(
-        [alpha, max(1e-4, final_tau), lambda_rho, -problem.stage.kappa], dtype=float
+        if abs(lambda_rho) <= 1e-12:
+            lambda_rho = 0.0
+        seeds.append(make(direction, base_final_tau, lambda_rho))
+    seeds.extend(
+        make(base_direction, final_tau, lambda_values[1])
+        for final_tau in final_time_shapes[1:]
     )
+    seeds.extend(
+        make(base_direction, base_final_tau, lambda_rho)
+        for lambda_rho in (lambda_values[0], lambda_values[2])
+    )
+    return seeds
+
+
+def _solve_lawden(problem: Problem, timing: TimingSeed) -> Candidate:
     lower = np.array([-math.pi, 1e-5, -100.0, -100.0], dtype=float)
     upper = np.array([math.pi, problem.time_limit, 100.0, 100.0], dtype=float)
     epsilon_values = (1.0, 0.3, 0.1, 0.03, 0.01, 0.003, 0.001, 0.0003)
-    history: list[dict[str, object]] = []
-    current = np.clip(seed, lower + 1e-8, upper - 1e-8)
-    for epsilon in epsilon_values:
+    best: Candidate | None = None
+    seed_results: list[dict[str, object]] = []
+    for seed_index, raw_seed in enumerate(_lawden_seeds(problem, timing)):
+        seed = np.clip(raw_seed, lower + 1e-8, upper - 1e-8)
+        history: list[dict[str, object]] = []
+        current = seed
+        for epsilon in epsilon_values:
+            try:
+                result = cast(Any, least_squares)(
+                    lambda values, epsilon=epsilon: _lawden_residual(
+                        problem, values, epsilon
+                    ),
+                    current,
+                    bounds=(lower, upper),
+                    method="trf",
+                    x_scale="jac",
+                    ftol=2e-9,
+                    xtol=2e-9,
+                    gtol=2e-9,
+                    max_nfev=180,
+                )
+                current = np.asarray(result.x, dtype=float)
+                residual = _lawden_residual(problem, current, epsilon)
+                q_min, q_max, fuel_fraction = _lawden_profile(problem, current, epsilon)
+                history.append(
+                    {
+                        "epsilon": epsilon,
+                        "nfev": int(result.nfev),
+                        "residual_norm": float(np.linalg.norm(residual)),
+                        "q_min": q_min,
+                        "q_max": q_max,
+                        "fuel_fraction": fuel_fraction,
+                    }
+                )
+                if q_min < 0.01 and q_max > 0.99:
+                    break
+            except (FloatingPointError, ValueError, ZeroDivisionError) as error:
+                history.append({"epsilon": epsilon, "error": str(error)})
+                break
+
         try:
-            result = cast(Any, least_squares)(
-                lambda values, epsilon=epsilon: _lawden_residual(
-                    problem, values, epsilon
-                ),
+            polish = cast(Any, least_squares)(
+                lambda values: _lawden_hard_residual(problem, values),
                 current,
                 bounds=(lower, upper),
                 method="trf",
@@ -1541,122 +1622,110 @@ def _solve_lawden(problem: Problem, explicit: Candidate) -> Candidate:
                 ftol=2e-9,
                 xtol=2e-9,
                 gtol=2e-9,
-                max_nfev=180,
+                max_nfev=300,
             )
-            current = np.asarray(result.x, dtype=float)
-            residual = _lawden_residual(problem, current, epsilon)
-            q_min, q_max, fuel_fraction = _lawden_profile(problem, current, epsilon)
-            history.append(
-                {
-                    "epsilon": epsilon,
-                    "nfev": int(result.nfev),
-                    "residual_norm": float(np.linalg.norm(residual)),
-                    "q_min": q_min,
-                    "q_max": q_max,
-                    "fuel_fraction": fuel_fraction,
-                }
+            parameters = np.asarray(polish.x, dtype=float)
+            residual = _lawden_hard_residual(problem, parameters)
+            final, phases, _switches, powered_tau = _propagate_lawden_hard(
+                problem, parameters, collect=True
             )
-            if q_min < 0.01 and q_max > 0.99:
-                break
-        except (FloatingPointError, ValueError, ZeroDivisionError) as error:
-            history.append({"epsilon": epsilon, "error": str(error)})
-            break
-
-    try:
-        polish = cast(Any, least_squares)(
-            lambda values: _lawden_hard_residual(problem, values),
-            current,
-            bounds=(lower, upper),
-            method="trf",
-            x_scale="jac",
-            ftol=2e-9,
-            xtol=2e-9,
-            gtol=2e-9,
-            max_nfev=300,
-        )
-        parameters = np.asarray(polish.x, dtype=float)
-        residual = _lawden_hard_residual(problem, parameters)
-        final, phases, _switches, powered_tau = _propagate_lawden_hard(
-            problem, parameters, collect=True
-        )
-        final_eta = float(final[3])
-        final_tau = float(phases[-1].tau[-1]) if phases else 0.0
-        sequence = _phase_sequence(phases)
-        short_phase = any(
-            phase.duration_tau < problem.min_phase_duration - 1e-12 for phase in phases
-        )
-        unsupported_sequence = sequence not in SUPPORTED_LAWDEN_SEQUENCES
-        valid = bool(
-            np.linalg.norm(residual) < RESIDUAL_TOL
-            and not short_phase
-            and not unsupported_sequence
-            and all(
-                (
-                    float(np.max(phase.switching)) >= -SWITCH_TOL
-                    if phase.kind == "burn"
-                    else float(np.min(phase.switching)) <= SWITCH_TOL
-                )
+            final_eta = float(final[3])
+            final_tau = float(phases[-1].tau[-1]) if phases else 0.0
+            sequence = _phase_sequence(phases)
+            short_phase = any(
+                phase.duration_tau < problem.min_phase_duration - 1e-12
                 for phase in phases
             )
+            unsupported_sequence = sequence not in SUPPORTED_LAWDEN_SEQUENCES
+            valid = bool(
+                np.linalg.norm(residual) < RESIDUAL_TOL
+                and not short_phase
+                and not unsupported_sequence
+                and all(
+                    (
+                        float(np.max(phase.switching)) >= -SWITCH_TOL
+                        if phase.kind == "burn"
+                        else float(np.min(phase.switching)) <= SWITCH_TOL
+                    )
+                    for phase in phases
+                )
+            )
+            message = str(polish.message)
+            optimizer_success = bool(polish.success)
+            if unsupported_sequence:
+                message = (
+                    f"unsupported Lawden phase sequence {_sequence_text(sequence)}; "
+                    + message
+                )
+            elif short_phase:
+                message = (
+                    f"Lawden phase is shorter than the implementation limit; {message}"
+                )
+            nfev = int(polish.nfev)
+        except (FloatingPointError, ValueError, ZeroDivisionError) as error:
+            parameters = current
+            residual = _lawden_residual(problem, current, epsilon_values[-1])
+            final = None
+            phases = []
+            powered_tau = 0.0
+            final_eta = None
+            final_tau = float(current[1])
+            sequence = ()
+            unsupported_sequence = False
+            short_phase = False
+            valid = False
+            message = f"hard Lawden polish failed: {error}"
+            optimizer_success = False
+            nfev = 0
+        limit_hit = powered_tau * problem.physical.time_scale_s >= (
+            problem.physical.max_burn_time_s - LIMIT_TOLERANCE_SECONDS
         )
-        message = str(polish.message)
-        optimizer_success = bool(polish.success)
-        if unsupported_sequence:
-            message = (
-                f"unsupported Lawden phase sequence {_sequence_text(sequence)}; "
-                + message
-            )
-        elif short_phase:
-            message = (
-                f"Lawden phase is shorter than the implementation limit; {message}"
-            )
-        nfev = int(polish.nfev)
-    except (FloatingPointError, ValueError, ZeroDivisionError) as error:
-        parameters = current
-        residual = _lawden_residual(problem, current, epsilon_values[-1])
-        final = None
-        phases = []
-        powered_tau = 0.0
-        final_eta = None
-        final_tau = float(current[1])
-        sequence = ()
-        unsupported_sequence = False
-        short_phase = False
-        valid = False
-        message = f"hard Lawden polish failed: {error}"
-        optimizer_success = False
-        nfev = 0
-    limit_hit = powered_tau * problem.physical.time_scale_s >= (
-        problem.physical.max_burn_time_s - LIMIT_TOLERANCE_SECONDS
-    )
-    return Candidate(
-        name="lawden",
-        formulation="lawden-sigmoid-hard-polish",
-        success=valid,
-        message=message,
-        parameters=parameters,
-        residual=np.asarray(residual, dtype=float),
-        final_state=(
-            None
-            if final is None
-            else np.asarray([final[0], final[1], final[2], final[3]], dtype=float)
-        ),
-        final_eta=final_eta,
-        phases=phases,
-        powered_tau=float(powered_tau),
-        final_tau=final_tau,
-        limit_hit=limit_hit,
-        sequence=sequence,
-        diagnostics={
-            "nfev": nfev,
-            "kappa": problem.stage.kappa,
-            "epsilon_history": history,
-            "optimizer_success": optimizer_success,
-            "phase_sequence": _sequence_text(sequence),
-            "unsupported_sequence": unsupported_sequence,
-            "short_phase": short_phase,
-        },
-    )
+        candidate = Candidate(
+            name="lawden",
+            formulation="lawden-sigmoid-hard-polish",
+            success=valid,
+            message=message,
+            parameters=np.asarray(parameters, dtype=float),
+            residual=np.asarray(residual, dtype=float),
+            final_state=(
+                None
+                if final is None
+                else np.asarray([final[0], final[1], final[2], final[3]], dtype=float)
+            ),
+            final_eta=final_eta,
+            phases=phases,
+            powered_tau=float(powered_tau),
+            final_tau=final_tau,
+            limit_hit=limit_hit,
+            sequence=sequence,
+            diagnostics={
+                "nfev": nfev,
+                "kappa": problem.stage.kappa,
+                "epsilon_history": history,
+                "optimizer_success": optimizer_success,
+                "phase_sequence": _sequence_text(sequence),
+                "unsupported_sequence": unsupported_sequence,
+                "short_phase": short_phase,
+            },
+        )
+        seed_results.append(
+            {
+                "seed_index": seed_index,
+                "seed": seed.tolist(),
+                "optimizer_success": optimizer_success,
+                "accepted": candidate.success,
+                "residual_norm": candidate.residual_norm,
+                "message": candidate.message,
+                "fuel_fraction": candidate.fuel_fraction,
+                "phase_sequence": _sequence_text(sequence),
+            }
+        )
+        if _candidate_is_better(candidate, best):
+            best = candidate
+    if best is None:
+        raise ValueError("no seeds were generated for the Lawden solver")
+    best.diagnostics["seed_results"] = seed_results
+    return best
 
 
 def _integrate_theta(
@@ -1752,11 +1821,7 @@ def find_oracle(
         _solve_explicit_mode(problem, "coast_burn", timing),
         _solve_explicit_mode(problem, "burn_only", timing),
     ]
-    explicit_seed = explicit_candidates[0]
-    for candidate in explicit_candidates[1:]:
-        if _candidate_is_better(candidate, explicit_seed):
-            explicit_seed = candidate
-    lawden = _solve_lawden(problem, explicit_seed)
+    lawden = _solve_lawden(problem, timing)
     candidates = [lawden, *explicit_candidates]
     accepted = [candidate for candidate in candidates if candidate.success]
     if not accepted:
