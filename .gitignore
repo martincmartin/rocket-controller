@@ -3,7 +3,6 @@ __pycache__/
 *.pyc
 *~
 .*.~undo-tree~
-PLAN.md
 explore.py
 step-control.csv
 mutagen.yml
